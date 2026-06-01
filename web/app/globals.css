@@ -1,0 +1,15 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* hide scrollbar but keep scroll functionality */
+.no-scrollbar::-webkit-scrollbar { display: none; }
+.no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+
+/* prose overrides for Thai text readability */
+.prose p { margin-top: 0.4em; margin-bottom: 0.4em; }
+.prose ul { margin-top: 0.4em; margin-bottom: 0.4em; }
+.prose li { margin-top: 0.2em; margin-bottom: 0.2em; }
+
+/* smooth font rendering */
+* { -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; }

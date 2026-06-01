@@ -1,5 +1,0 @@
-{
-  "name": "PharmaGuide AI",
-  "description": "A specialized clinical decision-support assistant built exclusively for licensed pharmacists, using uploaded guidelines as its only knowledge source.",
-  "requestFramePermissions": []
-}
