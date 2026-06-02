@@ -59,9 +59,10 @@ class Retriever:
         query_vec = self._embed(query)
         qdrant_filter = self._build_filter(disease_cat=disease_cat, lang=lang)
 
-        results = self._client.search(
+        from qdrant_client.models import Query
+        results = self._client.query_points(
             collection_name=self._collection,
-            query_vector=query_vec,
+            query=query_vec,
             limit=top_k,
             query_filter=qdrant_filter,
             score_threshold=score_threshold,
@@ -69,7 +70,7 @@ class Retriever:
         )
 
         chunks: list[RetrievedChunk] = []
-        for hit in results:
+        for hit in results.points:
             payload = hit.payload or {}
             source = self._format_source(payload)
             chunks.append(

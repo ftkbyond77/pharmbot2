@@ -7,9 +7,9 @@ import { ArrowUp, User, Menu, AlertTriangle } from "lucide-react";
 
 import { Message } from "@/types";
 import { cn, formatTime } from "@/lib/utils";
-import DiagnosisCard from "./DiagnosisCard";
-import SourcePanel from "./SourcePanel";
-import SuggestedQuestions from "./SuggestedQuestions";
+import DiagnosisCard from "@/components/DiagnosisCard";
+import SourcePanel from "@/components/SourcePanel";
+import SuggestedQuestions from "@/components/SuggestedQuestions";
 
 interface ChatWindowProps {
   messages: Message[];

@@ -52,7 +52,7 @@ def clinical_reason_node(state: AgentState) -> dict:
     red_flags: list[str] = []
 
     try:
-        raw = _strip_fences(response.content)
+        raw = strip_fences(response.content)
         data = json.loads(raw)
         symptom_summary = data.get("symptom_summary", [])
         ddx             = data.get("differential_diagnosis", [])
@@ -90,12 +90,3 @@ def _summarise_symptoms(state: AgentState) -> str:
     ]
     user_turns.append(state["user_message"])
     return "\n".join(f"- {t}" for t in user_turns)
-
-
-def _strip_fences(text: str) -> str:
-    text = text.strip()
-    if text.startswith("```"):
-        text = text.split("```")[1]
-        if text.startswith("json"):
-            text = text[4:]
-    return text.strip()

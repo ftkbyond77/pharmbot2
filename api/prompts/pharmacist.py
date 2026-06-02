@@ -182,3 +182,38 @@ def _format_history(history: list[dict]) -> str:
         role = "ผู้ใช้" if turn.get("role") == "user" else "เภสัชกร"
         lines.append(f"{role}: {turn.get('content', '')}")
     return "\n".join(lines)
+
+
+# ── Gemini response parser (shared across all nodes) ──────────
+
+def extract_text(content) -> str:
+    """
+    Gemini returns content as either:
+      - str                          (older SDK)
+      - list of dicts [{'type':'text','text':'...'}]  (newer SDK)
+
+    Always returns a plain string.
+    """
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for item in content:
+            if isinstance(item, dict) and "text" in item:
+                parts.append(item["text"])
+            elif isinstance(item, str):
+                parts.append(item)
+        return "".join(parts)
+    return str(content)
+
+
+def strip_fences(content) -> str:
+    """Extract text from Gemini response then strip markdown code fences."""
+    text = extract_text(content).strip()
+    if text.startswith("```"):
+        parts = text.split("```")
+        # parts[1] is inside the fences
+        text = parts[1] if len(parts) > 1 else text
+        if text.startswith("json"):
+            text = text[4:]
+    return text.strip()

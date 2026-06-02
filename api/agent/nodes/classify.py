@@ -14,6 +14,7 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 from api.agent.state import AgentState
 from api.config import get_settings
 from api.prompts.pharmacist import SYSTEM_PROMPT, classify_prompt
+from api.prompts.pharmacist import strip_fences
 
 
 def classify_node(state: AgentState) -> dict:

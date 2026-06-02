@@ -51,7 +51,7 @@ def safety_gate_node(state: AgentState) -> dict:
     ])
 
     try:
-        raw = _strip_fences(response.content)
+        raw = strip_fences(response.content)
         data = json.loads(raw)
         has_flag    = bool(data.get("has_red_flag", False))
         flags_found = data.get("red_flags_found", [])
@@ -80,12 +80,3 @@ def _refer(red_flags: list[str], reason: str | None) -> dict:
         "red_flags_found":  red_flags,
         "next_action":      "refer",
     }
-
-
-def _strip_fences(text: str) -> str:
-    text = text.strip()
-    if text.startswith("```"):
-        text = text.split("```")[1]
-        if text.startswith("json"):
-            text = text[4:]
-    return text.strip()

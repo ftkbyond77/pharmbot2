@@ -46,7 +46,7 @@ def clarify_node(state: AgentState) -> dict:
     score = cfg.completeness_threshold  # safe default
     missing: list[str] = []
     try:
-        raw = _strip_fences(score_resp.content)
+        raw = strip_fences(score_resp.content)
         data = json.loads(raw)
         score = float(data.get("score", cfg.completeness_threshold))
         missing = data.get("missing", [])
@@ -87,12 +87,3 @@ def clarify_node(state: AgentState) -> dict:
         "clarifying_question": None,
         "next_action": "retrieve",
     }
-
-
-def _strip_fences(text: str) -> str:
-    text = text.strip()
-    if text.startswith("```"):
-        text = text.split("```")[1]
-        if text.startswith("json"):
-            text = text[4:]
-    return text.strip()

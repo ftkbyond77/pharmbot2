@@ -13,7 +13,7 @@ Output : state.retrieved_chunks, state.next_action
 from loguru import logger
 
 from api.agent.state import AgentState
-from api.knowledge.retriever import get_retriever
+# from api.knowledge.retriever import get_retriever
 
 
 # how many history turns to include in the composite query
@@ -21,6 +21,7 @@ _HISTORY_WINDOW = 4
 
 
 def retrieve_node(state: AgentState) -> dict:
+    from api.knowledge.retriever import get_retriever
     retriever = get_retriever()
 
     # ── build composite query ─────────────────────────────────

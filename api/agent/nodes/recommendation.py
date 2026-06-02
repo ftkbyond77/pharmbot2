@@ -18,7 +18,7 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 from api.agent.state import AgentState
 from api.config import get_settings
 from api.knowledge.retriever import get_retriever
-from api.prompts.pharmacist import SYSTEM_PROMPT, recommendation_prompt
+from api.prompts.pharmacist import SYSTEM_PROMPT, recommendation_prompt, strip_fences
 
 
 def recommendation_node(state: AgentState) -> dict:
@@ -55,7 +55,7 @@ def recommendation_node(state: AgentState) -> dict:
     recommendation = ""
     sources: list[str] = []
     try:
-        raw = _strip_fences(response.content)
+        raw = strip_fences(response.content)
         data = json.loads(raw)
         recommendation = data.get("recommendation", "")
         sources        = data.get("sources", [])
@@ -84,12 +84,3 @@ def _format_ddx(ddx_list: list[dict]) -> str:
         )
         lines.append(f"{conf_emoji} {item.get('name', '')} ({item.get('confidence', '')})")
     return "\n".join(lines)
-
-
-def _strip_fences(text: str) -> str:
-    text = text.strip()
-    if text.startswith("```"):
-        text = text.split("```")[1]
-        if text.startswith("json"):
-            text = text[4:]
-    return text.strip()
