@@ -59,7 +59,15 @@ def clarify_node(state: AgentState) -> dict:
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user",   "content": completeness_prompt(user_msg, history)},
         ])
-        raw  = strip_fences(score_resp.content)
+        content = score_resp.content
+        if isinstance(content, list):
+            content = " ".join(
+                p.text if hasattr(p, "text")
+                else p.get("text", str(p)) if isinstance(p, dict)
+                else str(p)
+                for p in content
+            )
+        raw  = strip_fences(content)
         data = json.loads(raw)
         score       = float(data.get("score", cfg.completeness_threshold))
         missing     = data.get("missing", [])
@@ -95,7 +103,19 @@ def clarify_node(state: AgentState) -> dict:
                     ),
                 },
             ])
-            question = q_resp.content.strip()
+            raw_q = q_resp.content
+            if isinstance(raw_q, list):
+                parts = []
+                for p in raw_q:
+                    if hasattr(p, "text"):          # Gemini Part object
+                        parts.append(p.text)
+                    elif isinstance(p, dict):       # dict {"type": "text", "text": "..."}
+                        parts.append(p.get("text", str(p)))
+                    else:
+                        parts.append(str(p))
+                question = " ".join(parts).strip()
+            else:
+                question = str(raw_q).strip()
         except Exception as exc:
             logger.error(f"[clarify] question generation failed: {exc}")
             # graceful degrade — skip clarify, go to retrieve

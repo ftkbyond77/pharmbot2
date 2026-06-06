@@ -150,7 +150,7 @@ def clinical_reason_prompt(
 2. หากอาการไม่ชัดเจนในข้อ Guideline → ใช้ความรู้ทั่วไปเสริม แต่ระบุด้วย
 3. DDx: เรียงจากความน่าจะเป็นสูงสุด (common first) ตาม Bayesian prior
 4. หากความน่าจะเป็นใกล้เคียงกัน → เลือก common condition ก่อน
-5. Red flag: ตรวจสอบเข้มข้น อย่า miss
+5. Red flag: หากไม่พบ red flag ให้ red_flags เป็น [] (array ว่าง) ห้ามใส่ "ไม่มี" หรือข้อความอื่น
 
 ตอบด้วย JSON เท่านั้น:
 {{
@@ -166,7 +166,7 @@ def clinical_reason_prompt(
     "<เหตุผลที่ 1 — ภาษาเข้าใจง่าย อ้าง [N] ถ้ามาจาก guideline>",
     "<เหตุผลที่ 2>"
   ],
-  "red_flags": ["<red flag ที่พบ>"],
+  "red_flags": [],
   "knowledge_gaps": ["<อาการที่ต้องการข้อมูลเพิ่มแต่ไม่มีใน guideline>"]
 }}"""
 

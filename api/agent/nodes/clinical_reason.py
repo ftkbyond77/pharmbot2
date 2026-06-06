@@ -138,10 +138,14 @@ def _parse_ddx(raw_list: list) -> list[DDxItem]:
     return result
 
 
+_EMPTY_MARKERS = {"ไม่มี", "none", "n/a", "-", "–", "ไม่พบ", ""}
+
 def _ensure_list(val) -> list[str]:
-    """Ensure value is a list of non-empty strings."""
     if isinstance(val, list):
-        return [str(v).strip() for v in val if v and str(v).strip()]
-    if isinstance(val, str) and val.strip():
+        return [
+            str(v).strip() for v in val
+            if v and str(v).strip().lower() not in _EMPTY_MARKERS
+        ]
+    if isinstance(val, str) and val.strip().lower() not in _EMPTY_MARKERS:
         return [val.strip()]
     return []
