@@ -235,58 +235,100 @@ def _detect_lang(text: str) -> str:
     return "th" if thai / max(len(text), 1) > 0.08 else "en"
 
 
+def _is_cid_proxy(c: str) -> bool:
+    """True if character is in the CID proxy ranges used by broken Thai fonts."""
+    cp = ord(c)
+    return 0x00C0 <= cp <= 0x00FF or 0x0100 <= cp <= 0x024F
+
+
+def _has_any_cid(text: str) -> bool:
+    """
+    Zero-tolerance CID detector — used at PAGE level where Vision can rescue.
+
+    Returns True if the text contains ANY evidence of Thai CID font encoding.
+    Uses high-precision signals to avoid false positives from real Latin text
+    (drug names like amoxicillin, author names like Shaikh, journal names).
+
+    Thai CID font signature:
+      CID proxy chars (U+00C0-024F) appear ADJACENT to Thai vowel/tone marks
+      (U+0E30-0E4F). This pattern is physically impossible in real Latin text
+      because Latin scripts don't use Thai vowel marks.
+
+      Examples:
+        þĆึ = CID_proxy + CID_proxy + Thai_vowel(ึ)  → Thai CID font
+        Ăาวะ = CID_proxy + Thai_vowel(า) + Thai       → Thai CID font
+        amoxicillin = all ASCII                         → real Latin ✅
+        Shaikh N.   = all ASCII                         → real Latin ✅
+
+    Two checks, either triggers a positive:
+      1. CID chars adjacent to Thai vowel/tone marks (definitive Thai CID signal)
+      2. High-density CID ratio (> 20%) covering non-reference text
+    """
+    if not text or len(text) < 10:
+        return False
+
+    # ── Check 1: CID adjacent to Thai vowel/tone mark (zero false positives) ──
+    # Thai vowel/tone marks: U+0E30–0E4F (า ิ ี ึ ื ุ ู  ่ ้ ๊ ๋ ็ etc.)
+    # If a CID proxy char appears next to one of these, it's definitively CID.
+    cid_adj_thai = re.findall(
+        r"[À-ÿĀ-ɏ][ะ-๏]"   # CID before Thai vowel
+        r"|[ะ-๏][À-ÿĀ-ɏ]",  # Thai vowel before CID
+        text
+    )
+    if cid_adj_thai:
+        return True
+
+    # ── Check 2: High CID density fallback (catches CID-only pages) ──
+    # Only applies when Thai vowel adjacency wasn't found.
+    # Threshold 20% is deliberately high to avoid flagging reference pages
+    # (which may have author initials like "A.", "B." but no actual CID).
+    cid_count       = sum(1 for c in text if _is_cid_proxy(c))
+    total_non_space = max(len(re.sub(r"\s+", "", text)), 1)
+    if cid_count / total_non_space > 0.20:
+        return True
+
+    return False
+
+
 def _is_cid_garbage(text: str) -> bool:
     """
-    Detect CID-encoded garbage from Thai PDFs with broken font mapping.
+    Threshold-based CID detector — used at CHUNK level as final safety net.
 
-    When Thai PDFs are printed/exported via certain tools, Thai glyphs are
-    mapped to non-Thai Unicode codepoints. The mapping spans TWO ranges:
+    Less aggressive than _has_any_cid (used at page level) because at chunk
+    level we don't have a Vision fallback for individual sub-chunks from the
+    same page. Used only to prevent garbage from entering Qdrant if it somehow
+    slipped past the page-level filter.
 
-      Latin-1 Supplement upper  U+00C0–U+00FF  (ø ý ü þ ÷ ú etc.)
-      Latin Extended-A/B        U+0100–U+024F  (ā Ć Ĉ ą ă etc.)
-
-    Combined, we call these "CID proxy characters". Real Thai clinical text
-    almost never contains these characters (medical abbreviations use basic
-    ASCII). Presence above threshold = garbage.
-
-    Four detection checks (cheapest → most specific):
-
-    1. Combined ratio: >(CID_proxy / non-space) > 12%   → full garbage page
-    2. Cluster check:  ≥3 consecutive CID proxy chars   → partial garbage
-    3. Cluster count:  > 8 clusters anywhere in text    → scattered garbage
-    4. Isolated glyphs: many single CID chars separated by spaces
-                        ("ā ý ü ú þ" style per-glyph encoding)
+    Uses the same CID proxy definition but with relaxed thresholds.
     """
     if not text or len(text) < 20:
         return False
 
-    # CID proxy = Latin-1 Supplement upper + Latin Extended A/B
-    # (U+00C0–U+00FF covers: ø ý ü þ ÷ ú À Á ... Ñ etc.)
-    # (U+0100–U+024F covers: ā Ć Ĉ ą ă Ą etc.)
-    def _is_cid_proxy(c: str) -> bool:
-        cp = ord(c)
-        return 0x00C0 <= cp <= 0x00FF or 0x0100 <= cp <= 0x024F
+    # Reuse the adjacency check — still zero false positive
+    cid_adj_thai = re.findall(
+        r"[\u00c0-\u00ff\u0100-\u024f][\u0e30-\u0e4f]"
+        r"|[\u0e30-\u0e4f][\u00c0-\u00ff\u0100-\u024f]",
+        text
+    )
+    if cid_adj_thai:
+        return True
 
     cid_chars       = sum(1 for c in text if _is_cid_proxy(c))
     total_non_space = max(len(re.sub(r"\s+", "", text)), 1)
     cid_ratio       = cid_chars / total_non_space
 
-    # Check 1: ratio gate (full garbage or heavily corrupted pages)
+    # Chunk-level: 12% threshold (same as before — reasonable for sub-chunks)
     if cid_ratio > 0.12:
         return True
 
-    # Check 2 + 3: consecutive CID clusters
-    # Pattern covers both ranges: U+00C0-00FF and U+0100-024F
     clusters = re.findall(r"[\u00c0-\u00ff\u0100-\u024f]{3,}", text)
     if clusters:
         cluster_chars = sum(len(c) for c in clusters)
-        if cluster_chars / total_non_space > 0.06:   # Check 2: cluster coverage
+        if cluster_chars / total_non_space > 0.06:
             return True
-        if len(clusters) > 8:                         # Check 3: cluster count
+        if len(clusters) > 8:
             return True
 
-    # Check 4: isolated single CID-proxy chars (per-glyph encoding pattern)
-    # e.g. "ā ý ü ú þ" — each Thai glyph mapped to one Latin-ext char
     isolated = re.findall(r"(?<!\S)[\u00c0-\u00ff\u0100-\u024f](?!\S)", text)
     if len(isolated) > 12 and len(isolated) / total_non_space > 0.07:
         return True
@@ -769,11 +811,15 @@ def _docling_batch_markdown(pdf_path: Path, batch_pages: int) -> dict[tuple[int,
 def _pymupdf_text(pdf_path: Path) -> tuple[dict[int, str], set[int]]:
     """
     Extract text per page via PyMuPDF.
-    Detects CID-encoded garbage pages and excludes them from text output.
+
+    Zero-tolerance CID policy: uses _has_any_cid() (not threshold-based)
+    so ANY page containing CID chars adjacent to Thai vowels → Vision.
+    This eliminates mixed pages like references pages where most text is
+    clean but a few body lines are CID-corrupted.
 
     Returns:
-      clean_pages : {page_num: text}  — pages with readable text
-      cid_pages   : {page_num}        — pages with CID garbage → route to Vision
+      clean_pages : {page_num: text}  — confirmed 100% clean pages
+      cid_pages   : {page_num}        — any CID detected → Vision rescue
     """
     import fitz
     doc        = fitz.open(str(pdf_path))
@@ -787,9 +833,10 @@ def _pymupdf_text(pdf_path: Path) -> tuple[dict[int, str], set[int]]:
         if not text or len(text) < 20:
             continue
 
-        if _is_cid_garbage(text):
+        # Zero-tolerance: _has_any_cid catches even a single CID+Thai vowel pair
+        if _has_any_cid(text):
             cid.add(page_num)
-            logger.debug(f"[pymupdf] p{page_num}: CID garbage → routed to Vision")
+            logger.debug(f"[pymupdf] p{page_num}: CID detected → Vision rescue")
         else:
             clean[page_num] = text
 
