@@ -239,32 +239,56 @@ def _is_cid_garbage(text: str) -> bool:
     """
     Detect CID-encoded garbage from Thai PDFs with broken font mapping.
 
-    Thai PDFs printed or exported via certain tools map Thai glyphs to
-    Latin Extended Unicode codepoints (U+0100-U+024F) instead of real
-    Thai codepoints (U+0E00-U+0E7F). The result looks like:
-        "โĆคøิ÷เชื้อเฉีąýāĈัüĆะýý"
-    instead of:
-        "โรคติดเชื้อเฉียบพลัน"
+    When Thai PDFs are printed/exported via certain tools, Thai glyphs are
+    mapped to non-Thai Unicode codepoints. The mapping spans TWO ranges:
 
-    These CID-mapped chunks are useless for RAG — their embeddings
-    don't match any real Thai query. Flag them so Vision can handle them.
+      Latin-1 Supplement upper  U+00C0–U+00FF  (ø ý ü þ ÷ ú etc.)
+      Latin Extended-A/B        U+0100–U+024F  (ā Ć Ĉ ą ă etc.)
+
+    Combined, we call these "CID proxy characters". Real Thai clinical text
+    almost never contains these characters (medical abbreviations use basic
+    ASCII). Presence above threshold = garbage.
+
+    Four detection checks (cheapest → most specific):
+
+    1. Combined ratio: >(CID_proxy / non-space) > 12%   → full garbage page
+    2. Cluster check:  ≥3 consecutive CID proxy chars   → partial garbage
+    3. Cluster count:  > 8 clusters anywhere in text    → scattered garbage
+    4. Isolated glyphs: many single CID chars separated by spaces
+                        ("ā ý ü ú þ" style per-glyph encoding)
     """
     if not text or len(text) < 20:
         return False
 
-    # Latin Extended-A/B chars (U+0100–U+024F) used as CID glyph proxies
-    # Real Thai text almost never contains these characters
-    latin_ext = sum(1 for c in text if "\u0100" <= c <= "\u024f")
-    total_non_space = max(len(re.sub(r"\s+", "", text)), 1)
+    # CID proxy = Latin-1 Supplement upper + Latin Extended A/B
+    # (U+00C0–U+00FF covers: ø ý ü þ ÷ ú À Á ... Ñ etc.)
+    # (U+0100–U+024F covers: ā Ć Ĉ ą ă Ą etc.)
+    def _is_cid_proxy(c: str) -> bool:
+        cp = ord(c)
+        return 0x00C0 <= cp <= 0x00FF or 0x0100 <= cp <= 0x024F
 
-    # >15% Latin Extended → CID garbage
-    if latin_ext / total_non_space > 0.15:
+    cid_chars       = sum(1 for c in text if _is_cid_proxy(c))
+    total_non_space = max(len(re.sub(r"\s+", "", text)), 1)
+    cid_ratio       = cid_chars / total_non_space
+
+    # Check 1: ratio gate (full garbage or heavily corrupted pages)
+    if cid_ratio > 0.12:
         return True
 
-    # Secondary: many isolated single Latin-ext chars (CID glyph-per-char pattern)
-    # e.g. "ā ý ü ú þ" — real words don't look like this
-    isolated = re.findall(r"(?<!\S)[\u0100-\u024f](?!\S)", text)
-    if len(isolated) > 15 and len(isolated) / total_non_space > 0.08:
+    # Check 2 + 3: consecutive CID clusters
+    # Pattern covers both ranges: U+00C0-00FF and U+0100-024F
+    clusters = re.findall(r"[\u00c0-\u00ff\u0100-\u024f]{3,}", text)
+    if clusters:
+        cluster_chars = sum(len(c) for c in clusters)
+        if cluster_chars / total_non_space > 0.06:   # Check 2: cluster coverage
+            return True
+        if len(clusters) > 8:                         # Check 3: cluster count
+            return True
+
+    # Check 4: isolated single CID-proxy chars (per-glyph encoding pattern)
+    # e.g. "ā ý ü ú þ" — each Thai glyph mapped to one Latin-ext char
+    isolated = re.findall(r"(?<!\S)[\u00c0-\u00ff\u0100-\u024f](?!\S)", text)
+    if len(isolated) > 12 and len(isolated) / total_non_space > 0.07:
         return True
 
     return False
@@ -658,9 +682,13 @@ def _docling_full_markdown(pdf_path: Path) -> str:
     return md
 
 
-def _docling_batch_markdown(pdf_path: Path, batch_pages: int) -> str:
+def _docling_batch_markdown(pdf_path: Path, batch_pages: int) -> dict[tuple[int, int], str]:
     """
     Batch OCR: split into temp PDFs of batch_pages, run docling on each.
+
+    Returns:
+        {(start_page, end_page): markdown_text}  — 1-indexed page ranges
+        Callers can use the page range to route CID-garbage batches to Vision.
 
     Memory safety:
       - Each batch PDF is deleted immediately after processing (not at end)
@@ -672,7 +700,7 @@ def _docling_batch_markdown(pdf_path: Path, batch_pages: int) -> str:
 
     n_pages  = _page_count(pdf_path)
     tmp_dir  = Path(tempfile.mkdtemp(prefix="pharmbot_batch_"))
-    parts: list[str] = []
+    results: dict[tuple[int, int], str] = {}
     n_ok = 0
     n_fail = 0
 
@@ -681,6 +709,8 @@ def _docling_batch_markdown(pdf_path: Path, batch_pages: int) -> str:
 
         for start in range(0, n_pages, batch_pages):
             end        = min(start + batch_pages, n_pages)
+            # Convert to 1-indexed for page_range key
+            page_range = (start + 1, end)
             batch_path = tmp_dir / f"batch_{start:04d}.pdf"
 
             # ── Split: extract page range into a small temp PDF ───
@@ -695,7 +725,6 @@ def _docling_batch_markdown(pdf_path: Path, batch_pages: int) -> str:
                 n_fail += 1
                 continue
             finally:
-                # Close fitz handles immediately — don't hold file locks
                 if out: out.close()
                 if src: src.close()
 
@@ -705,38 +734,32 @@ def _docling_batch_markdown(pdf_path: Path, batch_pages: int) -> str:
                 result = converter.convert(str(batch_path))
                 md     = result.document.export_to_markdown() or ""
                 if md.strip():
-                    parts.append(md)
+                    results[page_range] = md
                     n_ok += 1
                 logger.debug(f"[docling:batch] p{start+1}–{end}: {len(md)} chars")
             except Exception as exc:
                 logger.warning(f"[docling:batch] p{start+1}–{end} failed: {exc}")
                 n_fail += 1
             finally:
-                # ── Critical: flush GPU/CPU memory after EACH batch ──
-                # DL frameworks retain VRAM allocations between batches.
-                # Without this, VRAM accumulates → std::bad_alloc on batch N+k.
                 try:
-                    del result  # release docling result object
+                    del result
                 except NameError:
-                    pass        # convert() failed before result was assigned
-                _flush_memory(f"batch_p{start+1}_{end}")
-                # Delete temp file immediately (don't wait for rmtree)
-                try:
-                    batch_path.unlink(missing_ok=True)
-                except Exception:
                     pass
+                _flush_memory(f"batch_p{start+1}_{end}")
+            # Delete temp PDF immediately after use
+            batch_path.unlink(missing_ok=True)
+
+        _flush_memory("batch_loop_end")
 
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
-        # Final flush after the entire batch loop
-        _flush_memory("batch_loop_end")
 
-    combined = "\n\n".join(parts)
+    total_chars = sum(len(v) for v in results.values())
     logger.info(
         f"[docling:batch] {pdf_path.name}: "
-        f"{n_ok}/{n_ok+n_fail} batches OK, {len(combined)} total chars"
+        f"{n_ok}/{n_ok+n_fail} batches OK, {total_chars} total chars"
     )
-    return combined
+    return results
 
 
 # ─────────────────────────────────────────────────────────────
@@ -791,12 +814,40 @@ def _build_chunks(
     chunk_type: str,
     page: int | None = None,
     extra_meta: dict | None = None,
-) -> list[IngestChunk]:
-    cfg    = get_settings()
-    chunks = []
+) -> tuple[list[IngestChunk], bool]:
+    """
+    Build IngestChunk objects from text.
+
+    Returns:
+        (chunks, was_cid_garbage)
+        - chunks         : clean IngestChunk list (never contains CID garbage)
+        - was_cid_garbage: True if ALL sub-chunks were dropped as CID garbage
+                           → caller should re-route this page to Vision
+
+    CID garbage gate: every sub-chunk is checked with _is_cid_garbage().
+    Garbage sub-chunks are dropped and logged. If every sub-chunk of a
+    page is garbage, the page is flagged for Vision re-processing so no
+    data is silently lost — it is rescued by Gemini Vision instead.
+    """
+    cfg       = get_settings()
+    chunks    = []
+    n_total   = 0
+    n_dropped = 0
+
     for t in _chunk_semantic(text, cfg.chunk_size, cfg.chunk_overlap):
         if not t.strip():
             continue
+        n_total += 1
+
+        # ── CID garbage gate ─────────────────────────────────
+        if _is_cid_garbage(t):
+            n_dropped += 1
+            logger.debug(
+                f"[chunk_gate] CID garbage dropped "
+                f"({filename} p{page}): '{t[:60]}...'"
+            )
+            continue
+
         chunks.append(IngestChunk(
             text=t,
             source=filename,
@@ -809,7 +860,20 @@ def _build_chunks(
             file_hash=fhash,
             extra_meta=extra_meta or {},
         ))
-    return chunks
+
+    # Flag page as fully-garbage if every sub-chunk was dropped
+    all_garbage = (n_total > 0 and n_dropped == n_total)
+
+    if n_dropped:
+        level = "warning" if all_garbage else "debug"
+        getattr(logger, level)(
+            f"[chunk_gate] {filename} p{page}: "
+            f"dropped {n_dropped}/{n_total} CID sub-chunk(s) "
+            f"extractor='{extractor}'"
+            + (" → page flagged for Vision re-route" if all_garbage else "")
+        )
+
+    return chunks, all_garbage
 
 
 # ─────────────────────────────────────────────────────────────
@@ -883,11 +947,25 @@ def _extract(
             else:
                 logger.warning(f"[extract] Tier 1 error: {exc}")
 
+    # Pages discovered to contain CID garbage — accumulated across all tiers
+    # so Vision can rescue them at the end (one pass, no duplicates)
+    cid_rescue_pages: set[int] = set()
+
+    # Helper: make PageAnalysis for a CID page to send to Vision
+    existing_vision_page_nums = {a.page_num for a in visual_pages}
+    def _queue_cid_for_vision(page_num: int) -> None:
+        if page_num not in existing_vision_page_nums and page_num not in cid_rescue_pages:
+            cid_rescue_pages.add(page_num)
+
+    # ── Tier 1: Docling text-layer ────────────────────────────
     docling_chunks: list[IngestChunk] = []
     if md_full.strip():
-        docling_chunks = _build_chunks(
+        raw_chunks, all_garbage = _build_chunks(
             md_full, filename, fhash, extractor="docling_text", chunk_type="text"
         )
+        docling_chunks = raw_chunks
+        # Tier 1 processes the full file as one blob — if everything is garbage,
+        # individual page numbers aren't available; we'll catch them in Tier 3
 
     logger.info(
         f"[extract] Tier 1 → {len(docling_chunks)} chunks "
@@ -898,52 +976,89 @@ def _extract(
         all_chunks.extend(docling_chunks)
     else:
         if use_ocr:
-            # ── Tier 2: batched OCR ───────────────────────────
+            # ── Tier 2: batched docling OCR ───────────────────
+            # Returns {(start_page, end_page): markdown} per batch.
+            # Each batch is checked for CID garbage individually so we know
+            # WHICH page range to send to Vision if OCR output is garbage.
             logger.info(f"[extract] Tier 2: docling batched OCR (batch={batch_pages})")
-            md_batch = _docling_batch_markdown(pdf_path, batch_pages)
-            batch_chunks = _build_chunks(
-                md_batch, filename, fhash, extractor="docling_ocr", chunk_type="text"
-            ) if md_batch.strip() else []
+            batch_results = _docling_batch_markdown(pdf_path, batch_pages)
+            batch_chunks: list[IngestChunk] = []
+
+            for (p_start, p_end), md in batch_results.items():
+                if not md.strip():
+                    continue
+                b_chunks, all_garbage = _build_chunks(
+                    md, filename, fhash,
+                    extractor="docling_ocr", chunk_type="text",
+                    page=p_start,   # tag with first page of batch
+                )
+                if all_garbage:
+                    # Entire batch is CID garbage → queue every page for Vision
+                    for p in range(p_start, p_end + 1):
+                        _queue_cid_for_vision(p)
+                    logger.info(
+                        f"[extract] Tier 2 batch p{p_start}–{p_end}: "
+                        f"all CID garbage → queued for Vision rescue"
+                    )
+                else:
+                    batch_chunks.extend(b_chunks)
+
             logger.info(f"[extract] Tier 2 → {len(batch_chunks)} chunks")
             all_chunks.extend(batch_chunks)
 
-        # ── Tier 3: PyMuPDF — always runs when Tier 1 yield is low ─
-        # Filters out CID garbage pages automatically.
-        # CID pages are collected and merged into visual_pages for Vision.
+        # ── Tier 3: PyMuPDF page-by-page ─────────────────────
+        # Processes per-page so CID pages can be individually routed to Vision.
         logger.info(f"[extract] Tier 3: PyMuPDF full sweep (with CID detection)")
         pymupdf_clean, pymupdf_cid = _pymupdf_text(pdf_path)
         pymupdf_chunks: list[IngestChunk] = []
+
         for page_num, text in pymupdf_clean.items():
-            pymupdf_chunks.extend(_build_chunks(
+            page_chunks, page_all_garbage = _build_chunks(
                 text, filename, fhash,
                 extractor="pymupdf", chunk_type="text", page=page_num,
-            ))
+            )
+            if page_all_garbage:
+                # PyMuPDF reported "clean" but _build_chunks gate caught garbage
+                # (partial CID page that passed page-level threshold)
+                _queue_cid_for_vision(page_num)
+                logger.info(
+                    f"[extract] Tier 3 p{page_num}: partially-CID page "
+                    f"→ queued for Vision rescue"
+                )
+            else:
+                pymupdf_chunks.extend(page_chunks)
+
+        # PyMuPDF CID pages (detected at page level)
+        for p in sorted(pymupdf_cid):
+            _queue_cid_for_vision(p)
 
         logger.info(
             f"[extract] Tier 3 → {len(pymupdf_chunks)} chunks from "
             f"{len(pymupdf_clean)} clean pages "
-            f"({len(pymupdf_cid)} CID pages routed to Vision)"
+            f"({len(pymupdf_cid)} page-level CID + "
+            f"{len(cid_rescue_pages) - len(pymupdf_cid)} chunk-level CID → Vision)"
         )
         all_chunks.extend(pymupdf_chunks)
 
-        # Merge CID pages into visual_pages for Vision processing
-        if pymupdf_cid:
+        # Add all CID pages to Vision queue (deduped against existing visual_pages)
+        if cid_rescue_pages:
             cid_analyses = [
                 PageAnalysis(
                     page_num=p,
-                    page_type="mixed",   # treat CID pages as mixed — render + describe
+                    page_type="mixed",
                     text="",
                     text_confidence=0.0,
-                    has_image=True,      # force Vision routing
+                    has_image=True,
                     has_table=False,
                 )
-                for p in sorted(pymupdf_cid)
-                if p not in {a.page_num for a in visual_pages}  # no duplicates
+                for p in sorted(cid_rescue_pages)
             ]
             visual_pages = visual_pages + cid_analyses
-            logger.info(f"[extract] {len(cid_analyses)} CID pages added to Vision queue")
+            logger.info(
+                f"[extract] {len(cid_analyses)} CID pages queued for Vision rescue"
+            )
 
-    # ── Vision bypass for chart/mixed/CID pages ───────────────
+    # ── Vision: chart/mixed/CID pages ────────────────────────
     if use_vision and visual_pages:
         logger.info(
             f"[extract] Vision bypass: {len(visual_pages)} pages "
@@ -957,12 +1072,13 @@ def _extract(
             )
             if description:
                 c_type = "vision_chart" if analysis.page_type == "chart" else "vision_mixed"
-                vision_chunks.extend(_build_chunks(
+                raw_v, _ = _build_chunks(
                     description, filename, fhash,
                     extractor="vision", chunk_type=c_type,
                     page=analysis.page_num,
                     extra_meta={"original_page_type": analysis.page_type},
-                ))
+                )
+                vision_chunks.extend(raw_v)
 
         logger.info(f"[extract] Vision → {len(vision_chunks)} chunks")
         all_chunks.extend(vision_chunks)

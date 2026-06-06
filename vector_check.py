@@ -28,8 +28,6 @@ sys.path.insert(0, ".")
 from qdrant_client import QdrantClient
 from qdrant_client.models import Filter, FieldCondition, MatchValue, ScrollRequest
 
-from qdrant_client.http import models
-
 # ─────────────────────────────────────────────────────────────
 #  Config (อ่านจาก .env เหมือน ingest)
 # ─────────────────────────────────────────────────────────────
@@ -166,18 +164,24 @@ def semantic_search(
     top_k: int = 10,
     source_filter: str | None = None,
 ) -> list[tuple[float, dict]]:
+    """Embed query and search Qdrant."""
     from sentence_transformers import SentenceTransformer
-    
-    # ดึง Embedding model (เปลี่ยนชื่อ model ตาม config ของคุณ)
-    model = SentenceTransformer("BAAI/bge-m3")
+    try:
+        model_name = cfg.embedding_model
+    except Exception:
+        model_name = "BAAI/bge-m3"
+
+    print(f"{_color('Loading embedding model...', DIM)}", end=" ", flush=True)
+    model = SentenceTransformer(model_name)
+    print(_color("done", GREEN))
+
     vec = model.encode([query], normalize_embeddings=True)[0].tolist()
 
-    # สร้าง Filter
     flt = None
     if source_filter:
-        flt = models.Filter(must=[models.FieldCondition(
+        flt = Filter(must=[FieldCondition(
             key="source",
-            match=models.MatchValue(value=source_filter),
+            match=MatchValue(value=source_filter),
         )])
 
     results = client.query_points(
@@ -187,8 +191,8 @@ def semantic_search(
         limit=top_k,
         with_payload=True,
     )
-    
     return [(r.score, r.payload) for r in results.points]
+
 
 # ─────────────────────────────────────────────────────────────
 #  Report sections

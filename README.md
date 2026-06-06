@@ -22,9 +22,6 @@ uvicorn api.main:app --reload --host 0.0.0.0 --port 8000
 
 ล้าง Qdrant + Cache
 
-### ลบ hash registry
-Remove-Item -Recurse -Force .openkb_cache
-
 ### ลบ collection เก่า
 python -c "
 from qdrant_client import QdrantClient
