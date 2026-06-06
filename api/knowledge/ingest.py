@@ -150,32 +150,124 @@ def _get_docling(use_ocr: bool, use_table: bool):
 
 def _chunk_semantic(text: str, size: int, overlap: int) -> Iterator[str]:
     """
-    Semantic chunker: split on markdown headings first,
-    then apply word-level sliding window within each section.
-    Preserves heading context — drug dosage never split from its heading.
+    Structure-aware chunker — splits on document structure, not word count.
+
+    Split boundaries (in priority order):
+    1. Markdown headings (## / ###) — from docling output
+    2. Thai clinical section keywords (บทนำา, สาเหตุ, การรักษา, etc.)
+
+    Deliberately excludes numbered-list splitting because numbered items
+    inside flowcharts (1. โหนด, 2. โหนด) must stay together — splitting
+    them destroys the decision logic needed for clinical Q&A.
+
+    For sections exceeding `size` words, sliding window is applied with
+    the section heading prepended to every continuation chunk so each
+    vector is fully self-contained for retrieval.
+
+    Guarantees:
+    - Drug dosage table + its heading → always 1 chunk
+    - Flowchart/algorithm nodes → always 1 chunk (if ≤ size)
+    - Long treatment sections → split with heading prefix on sub-chunks
     """
-    # Split on h1/h2/h3 headings — keep the heading with its content
-    parts = re.split(r"(?m)(?=^#{1,3} )", text)
-    for part in parts:
-        if not part.strip():
-            continue
-        words = part.split()
+    BOUNDARY = re.compile(
+        r"(?m)(?="
+        r"^#{1,3} "
+        r"|^(?:บทนำ[าา]?|คำ[าา]นำ[าา]?|สาเหตุ|ระบาดวิทยา|ลักษณะอาการ|"
+        r"อาการ(?:ทางคลินิก)?|การวินิจฉัย|การตรวจ|การรักษา|"
+        r"ภาวะแทรกซ้อน|การป้องกัน|เอกสารอ้างอิง|ข้อแนะนำ[าา]?|"
+        r"คำ[าา]จำ[าา]กัดความ|การจำ[าา]แนก|ปัจจัยเสี่ยง|"
+        r"สรุป|บทสรุป|ผลการรักษา)"
+        r")"
+    )
+
+    def _extract_heading(s: str) -> str:
+        first = s.strip().splitlines()[0] if s.strip() else ""
+        return first[:120]
+
+    def _split_section(section: str, heading: str) -> Iterator[str]:
+        words = section.split()
+        if not words:
+            return
         if len(words) <= size:
-            # Short section — emit as-is (preserve context intact)
-            yield part.strip()
-        else:
-            # Long section — sliding window
-            start = 0
-            while start < len(words):
-                chunk = " ".join(words[start: start + size])
-                if chunk.strip():
-                    yield chunk
-                start += size - overlap
+            yield section.strip()
+            return
+        heading_words = heading.split() if heading else []
+        step = max(1, size - overlap)
+        start = 0
+        while start < len(words):
+            if start == 0:
+                chunk_words = words[start: start + size]
+            else:
+                prefix      = heading_words + ["[...จากหัวข้อด้านบน]"]
+                available   = size - len(prefix)
+                chunk_words = prefix + words[start: start + max(1, available)]
+            chunk = " ".join(chunk_words).strip()
+            if chunk:
+                yield chunk
+            start += step
+
+    # Merge tiny stub sections (< 8 words) into next section
+    # to avoid floating one-line heading chunks in retrieval
+    raw = BOUNDARY.split(text)
+    merged: list[str] = []
+    i = 0
+    while i < len(raw):
+        sec = raw[i].strip()
+        if not sec:
+            i += 1
+            continue
+        if len(sec.split()) < 8 and (i + 1) < len(raw):
+            nxt = raw[i + 1].strip()
+            if nxt:
+                merged.append(sec + "\n\n" + nxt)
+                i += 2
+                continue
+        merged.append(sec)
+        i += 1
+
+    for section in merged:
+        heading = _extract_heading(section)
+        yield from _split_section(section, heading)
 
 
 def _detect_lang(text: str) -> str:
     thai = sum(1 for c in text if "\u0e00" <= c <= "\u0e7f")
     return "th" if thai / max(len(text), 1) > 0.08 else "en"
+
+
+def _is_cid_garbage(text: str) -> bool:
+    """
+    Detect CID-encoded garbage from Thai PDFs with broken font mapping.
+
+    Thai PDFs printed or exported via certain tools map Thai glyphs to
+    Latin Extended Unicode codepoints (U+0100-U+024F) instead of real
+    Thai codepoints (U+0E00-U+0E7F). The result looks like:
+        "โĆคøิ÷เชื้อเฉีąýāĈัüĆะýý"
+    instead of:
+        "โรคติดเชื้อเฉียบพลัน"
+
+    These CID-mapped chunks are useless for RAG — their embeddings
+    don't match any real Thai query. Flag them so Vision can handle them.
+    """
+    if not text or len(text) < 20:
+        return False
+
+    # Latin Extended-A/B chars (U+0100–U+024F) used as CID glyph proxies
+    # Real Thai text almost never contains these characters
+    latin_ext = sum(1 for c in text if "\u0100" <= c <= "\u024f")
+    total_non_space = max(len(re.sub(r"\s+", "", text)), 1)
+
+    # >15% Latin Extended → CID garbage
+    if latin_ext / total_non_space > 0.15:
+        return True
+
+    # Secondary: many isolated single Latin-ext chars (CID glyph-per-char pattern)
+    # e.g. "ā ý ü ú þ" — real words don't look like this
+    isolated = re.findall(r"(?<!\S)[\u0100-\u024f](?!\S)", text)
+    if len(isolated) > 15 and len(isolated) / total_non_space > 0.08:
+        return True
+
+    return False
 
 
 def _infer_category(text: str, filename: str) -> str:
@@ -346,32 +438,54 @@ def _classify_pages(pdf_path: Path) -> list[PageAnalysis]:
 # ─────────────────────────────────────────────────────────────
 
 _VISION_PROMPT = """\
-You are a medical document analyst. This image is a page from a clinical guideline PDF.
+You are a medical document analyst. This image is a page from a Thai/English clinical guideline PDF.
 
-Analyze the content carefully and produce a **complete Markdown description** of:
-1. If this is a flowchart / decision tree / treatment algorithm:
-   - Describe every decision node as a numbered step
-   - Use `→` to show flow direction
-   - Include all conditions, branches, and outcomes
-   - Example format:
-     ## Treatment Algorithm: [Title]
-     1. **Initial assessment**: [condition]
-        - If YES → [next step or treatment]
-        - If NO → [alternative path]
-     2. **[Next node]**: ...
+Your output will be stored in a vector database for retrieval. It is critical that:
+1. Chart/diagram titles are preserved exactly as headings so retrieval can find them by name.
+2. Hierarchy and flow relationships are preserved so clinical decisions can be reconstructed.
+3. All text visible in the image is captured.
 
-2. If this is a table:
-   - Reproduce it as a Markdown table with all rows/columns
-   - Add a heading describing what the table is about
+## Output Rules
 
-3. If this is a graph/chart:
-   - Describe axes, key values, and clinical conclusions
+### ALWAYS start with a title heading:
+- If you see a label like "แผนภูมิที่ 1", "ภาพที่ 2", "Figure 3", "ตารางที่ 1" — use it EXACTLY as the ## heading.
+- If there is a descriptive title (e.g. "แนวทางการประเมินผู้ป่วยเด็กที่มีน้ำมูก") — include it after the label.
+- If no label is visible, infer a short descriptive title from the content.
+- Format: `## แผนภูมิที่ N: [ชื่อแผนภูมิ]` or `## ตารางที่ N: [ชื่อตาราง]`
 
-4. If there is any text alongside the visual:
-   - Include it verbatim
+### For flowcharts / decision trees / treatment algorithms:
+- Preserve the EXACT hierarchy: root node → branches → leaf nodes.
+- Use indentation to show depth level.
+- Use `→` for flow direction.
+- Use `[ถ้าใช่]` / `[ถ้าไม่]` or `[YES]` / `[NO]` for decision branches.
+- Number each decision node sequentially.
+- Capture ALL boxes/diamonds/labels — do not skip any node.
+- Format:
+  ```
+  ## แผนภูมิที่ N: [ชื่อ]
+  **จุดเริ่มต้น**: [เงื่อนไขเริ่มต้น]
+  1. [โหนดแรก]
+     - [ถ้าใช่] → [ขั้นตอนถัดไป หรือการวินิจฉัย]
+     - [ถ้าไม่] → [ทางเลือกอื่น]
+  2. [โหนดถัดไป]
+     - ...
+  **ผลลัพธ์**: [การวินิจฉัยสุดท้าย / การรักษา]
+  ```
 
-Language: respond in the same language as the document (Thai or English).
-Be thorough — this description will be the ONLY source of information from this page.
+### For tables:
+- Reproduce as full Markdown table with all rows and columns.
+- Use `## ตารางที่ N: [ชื่อตาราง]` as heading.
+- Do not skip any row, even if it looks like a sub-row.
+
+### For graphs / clinical charts:
+- Describe: title, axes labels, units, key data points, and clinical conclusion.
+
+### For pages mixing text and visuals:
+- First transcribe all body text verbatim.
+- Then describe each visual element with its title heading.
+
+Language: respond in Thai if the document is Thai, English if English. Match the document language exactly.
+Be exhaustive — this description is the ONLY representation of this page in the system.
 """
 
 
@@ -417,11 +531,27 @@ def _vision_describe_page(
             mime_type="image/png",
         )
 
-        context_note = (
-            "This page appears to contain a flowchart or decision diagram."
-            if page_type == "chart"
-            else "This page contains a mix of text and visual elements."
-        )
+        # Build context note — specific to page type for better model guidance
+        if page_type == "chart":
+            context_note = (
+                f"Page {page_num}: This page contains a flowchart, decision tree, "
+                f"or treatment algorithm. Extract ALL nodes and flow relationships. "
+                f"Look for any แผนภูมิที่/ภาพที่/Figure label and use it as the title."
+            )
+        elif page_type == "mixed":
+            context_note = (
+                f"Page {page_num}: This page contains both body text and visual "
+                f"elements (tables, diagrams, or charts). "
+                f"Transcribe all text first, then describe each visual with its label/title."
+            )
+        else:
+            # CID pages or unknown — full render, ask to read everything
+            context_note = (
+                f"Page {page_num}: This page contains Thai text and/or visual content. "
+                f"Please read and transcribe ALL visible text carefully "
+                f"(the automated text extraction failed for this page). "
+                f"Also describe any diagrams, tables, or flowcharts present."
+            )
         prompt_text = f"{context_note}\n\n{_VISION_PROMPT}"
 
         # Safety settings: allow medical content
@@ -455,28 +585,45 @@ def _vision_describe_page(
             ),
         )
 
-        # Robust text extraction:
-        # response.text shortcut can still be None even with safety off
-        # (e.g. blank/empty image, finish_reason=MAX_TOKENS with 0 text)
-        # → walk candidates[0].content.parts as fallback
+        # ── Robust text extraction ────────────────────────────────
+        # response.text  : shortcut, can be None even with BLOCK_NONE
+        # response.candidates : can be None (not just empty list) when
+        #   Gemini hard-blocks at API level regardless of safety settings
+        # Strategy: try 3 paths, degrade gracefully, never crash
         result = None
-        if response.text is not None:
-            result = response.text.strip() or None
-        if result is None and response.candidates:
-            text_parts = [
-                p.text for p in response.candidates[0].content.parts
-                if hasattr(p, "text") and p.text
-            ]
-            result = "\n".join(text_parts).strip() or None
 
+        # Path 1: .text shortcut (fastest)
+        try:
+            if response.text is not None:
+                result = response.text.strip() or None
+        except Exception:
+            pass
+
+        # Path 2: walk candidates[0].content.parts
         if result is None:
-            finish = (
-                response.candidates[0].finish_reason
-                if response.candidates else "UNKNOWN"
-            )
+            try:
+                candidates = response.candidates or []
+                if candidates and candidates[0].content and candidates[0].content.parts:
+                    text_parts = [
+                        p.text for p in candidates[0].content.parts
+                        if hasattr(p, "text") and p.text
+                    ]
+                    result = "\n".join(text_parts).strip() or None
+            except Exception:
+                pass
+
+        # Path 3: nothing worked — log details and skip
+        if result is None:
+            finish = "UNKNOWN"
+            try:
+                candidates = response.candidates or []
+                if candidates:
+                    finish = str(candidates[0].finish_reason)
+            except Exception:
+                pass
             logger.warning(
                 f"[vision] page {page_num} ({page_type}): "
-                f"no text returned (finish_reason={finish})"
+                f"no text returned (finish_reason={finish}) — skipping"
             )
             return None
 
@@ -596,20 +743,40 @@ def _docling_batch_markdown(pdf_path: Path, batch_pages: int) -> str:
 #  Step 2a fallback — PyMuPDF raw text
 # ─────────────────────────────────────────────────────────────
 
-def _pymupdf_text(pdf_path: Path) -> dict[int, str]:
+def _pymupdf_text(pdf_path: Path) -> tuple[dict[int, str], set[int]]:
     """
     Extract text per page via PyMuPDF.
-    Returns {page_num: text} (1-indexed).
+    Detects CID-encoded garbage pages and excludes them from text output.
+
+    Returns:
+      clean_pages : {page_num: text}  — pages with readable text
+      cid_pages   : {page_num}        — pages with CID garbage → route to Vision
     """
     import fitz
-    doc    = fitz.open(str(pdf_path))
-    result = {}
+    doc        = fitz.open(str(pdf_path))
+    clean: dict[int, str] = {}
+    cid:   set[int]       = set()
+
     for i, page in enumerate(doc):
-        text = page.get_text("text").strip()
-        if text and len(text) > 20:
-            result[i + 1] = text
+        text     = page.get_text("text").strip()
+        page_num = i + 1
+
+        if not text or len(text) < 20:
+            continue
+
+        if _is_cid_garbage(text):
+            cid.add(page_num)
+            logger.debug(f"[pymupdf] p{page_num}: CID garbage → routed to Vision")
+        else:
+            clean[page_num] = text
+
     doc.close()
-    return result
+    if cid:
+        logger.info(
+            f"[pymupdf] {pdf_path.name}: "
+            f"{len(clean)} clean pages, {len(cid)} CID pages {sorted(cid)[:10]}{'...' if len(cid)>10 else ''}"
+        )
+    return clean, cid
 
 
 # ─────────────────────────────────────────────────────────────
@@ -741,22 +908,42 @@ def _extract(
             all_chunks.extend(batch_chunks)
 
         # ── Tier 3: PyMuPDF — always runs when Tier 1 yield is low ─
-        # Simple rule: if docling couldn't give us enough, take ALL
-        # pages from PyMuPDF. No gap calculation needed — PyMuPDF is
-        # fast and reliable; duplicate semantic content is harmless.
-        logger.info(f"[extract] Tier 3: PyMuPDF full sweep")
-        pymupdf_pages   = _pymupdf_text(pdf_path)
+        # Filters out CID garbage pages automatically.
+        # CID pages are collected and merged into visual_pages for Vision.
+        logger.info(f"[extract] Tier 3: PyMuPDF full sweep (with CID detection)")
+        pymupdf_clean, pymupdf_cid = _pymupdf_text(pdf_path)
         pymupdf_chunks: list[IngestChunk] = []
-        for page_num, text in pymupdf_pages.items():
+        for page_num, text in pymupdf_clean.items():
             pymupdf_chunks.extend(_build_chunks(
                 text, filename, fhash,
                 extractor="pymupdf", chunk_type="text", page=page_num,
             ))
 
-        logger.info(f"[extract] Tier 3 → {len(pymupdf_chunks)} chunks from {len(pymupdf_pages)} pages")
+        logger.info(
+            f"[extract] Tier 3 → {len(pymupdf_chunks)} chunks from "
+            f"{len(pymupdf_clean)} clean pages "
+            f"({len(pymupdf_cid)} CID pages routed to Vision)"
+        )
         all_chunks.extend(pymupdf_chunks)
 
-    # ── Vision bypass for chart/mixed pages ───────────────────
+        # Merge CID pages into visual_pages for Vision processing
+        if pymupdf_cid:
+            cid_analyses = [
+                PageAnalysis(
+                    page_num=p,
+                    page_type="mixed",   # treat CID pages as mixed — render + describe
+                    text="",
+                    text_confidence=0.0,
+                    has_image=True,      # force Vision routing
+                    has_table=False,
+                )
+                for p in sorted(pymupdf_cid)
+                if p not in {a.page_num for a in visual_pages}  # no duplicates
+            ]
+            visual_pages = visual_pages + cid_analyses
+            logger.info(f"[extract] {len(cid_analyses)} CID pages added to Vision queue")
+
+    # ── Vision bypass for chart/mixed/CID pages ───────────────
     if use_vision and visual_pages:
         logger.info(
             f"[extract] Vision bypass: {len(visual_pages)} pages "

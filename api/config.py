@@ -43,11 +43,15 @@ class Settings(BaseSettings):
     # ── LLM (ingestion — vision model for charts/diagrams) ────
     # Used ONLY at ingest time — never loaded at runtime
     ingest_vision_model: str              = "gemini-2.5-pro"
-    ingest_vision_max_tokens: int         = 1024
+    # 1024 was too low — flowcharts with many nodes hit MAX_TOKENS mid-response.
+    # Typical complex Thai guideline flowchart needs ~1500-2500 tokens.
+    # 8192 = safe ceiling; Gemini 2.5 Pro supports up to 65536 output tokens.
+    ingest_vision_max_tokens: int         = 8192
     # Page-level text confidence below this → send page image to vision LLM
     ingest_vision_confidence_threshold: float = 0.4
-    # DPI for rendering PDF pages as images (higher = better, more memory)
-    ingest_vision_dpi: int                = 150
+    # DPI for rendering PDF pages as images (higher = better detail, more memory)
+    # 150 was barely enough for dense Thai text; 200 gives cleaner glyph rendering
+    ingest_vision_dpi: int                = 200
 
     # ── Qdrant ───────────────────────────────────────────────
     qdrant_url: str         = "http://localhost:6333"
