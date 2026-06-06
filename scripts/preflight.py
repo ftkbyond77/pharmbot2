@@ -1,42 +1,35 @@
 """
 scripts/preflight.py
 --------------------
-Run BEFORE starting the system.
-Checks every dependency and prints a clear pass/fail report.
-
-Usage:
+Pre-flight check — run before starting the server:
     python scripts/preflight.py
-    python scripts/preflight.py --fix   # auto-install missing packages
+    python scripts/preflight.py --fix    # auto-install missing packages
 """
 
-import argparse
+from __future__ import annotations
+
 import importlib
-import os
 import subprocess
 import sys
-from pathlib import Path
-
-# ── colour helpers (no external deps) ────────────────────────
-GREEN  = "\033[92m"
-RED    = "\033[91m"
-YELLOW = "\033[93m"
-CYAN   = "\033[96m"
-BOLD   = "\033[1m"
-RESET  = "\033[0m"
-
-ok   = lambda s: f"{GREEN}✓{RESET} {s}"
-fail = lambda s: f"{RED}✗{RESET} {s}"
-warn = lambda s: f"{YELLOW}⚠{RESET} {s}"
-info = lambda s: f"{CYAN}→{RESET} {s}"
+import warnings as stdlib_warnings
 
 errors:   list[str] = []
 warnings: list[str] = []
 
+# ── ANSI ──────────────────────────────────────────────────────
+GREEN  = "\033[92m"
+YELLOW = "\033[93m"
+RED    = "\033[91m"
+BOLD   = "\033[1m"
+RESET  = "\033[0m"
 
+def ok(msg: str)   -> str: return f"  {GREEN}✓{RESET} {msg}"
+def warn(msg: str) -> str: return f"  {YELLOW}⚠{RESET} {msg}"
+def fail(msg: str) -> str: return f"  {RED}✗{RESET} {msg}"
+def info(msg: str) -> str: return f"    {msg}"
 def section(title: str) -> None:
-    print(f"\n{BOLD}{CYAN}{'─'*50}{RESET}")
-    print(f"{BOLD} {title}{RESET}")
-    print(f"{BOLD}{CYAN}{'─'*50}{RESET}")
+    print(f"\n{BOLD}{title}{RESET}")
+    print("─" * 50)
 
 
 # ── 1. Python version ─────────────────────────────────────────
@@ -54,30 +47,30 @@ def check_python() -> None:
         errors.append("Python version too old")
 
 
-# ── 2. Required Python packages ───────────────────────────────
+# ── 2. Required packages ──────────────────────────────────────
+# (import_name, pip_name, critical)
 REQUIRED_PACKAGES = [
-    # (import_name, pip_name, critical)
-    ("fastapi",                   "fastapi",                  True),
-    ("uvicorn",                   "uvicorn[standard]",        True),
-    ("pydantic",                  "pydantic",                 True),
-    ("pydantic_settings",         "pydantic-settings",        True),
-    ("dotenv",                    "python-dotenv",            True),
-    ("langgraph",                 "langgraph",                True),
-    ("langchain",                 "langchain",                True),
-    ("langchain_google_genai",    "langchain-google-genai",   True),
-    ("langchain_community",       "langchain-community",      True),
-    ("litellm",                   "litellm",                  True),
-    ("openkb",                    "openkb",                   True),
-    ("qdrant_client",             "qdrant-client",            True),
-    ("sentence_transformers",     "sentence-transformers",    True),
-    ("torch",                     "torch",                    True),
-    ("fitz",                      "pymupdf",                  True),  # PyMuPDF
-    ("unstructured",              "unstructured[pdf]",        False), # optional heavy dep
-    ("pythainlp",                 "pythainlp",                False),
-    ("tenacity",                  "tenacity",                 True),
-    ("loguru",                    "loguru",                   True),
-    ("httpx",                     "httpx",                    True),
+    ("fastapi",               "fastapi",                    True),
+    ("uvicorn",               "uvicorn[standard]",          True),
+    ("pydantic",              "pydantic",                   True),
+    ("pydantic_settings",     "pydantic-settings",          True),
+    ("dotenv",                "python-dotenv",              True),
+    ("langgraph",             "langgraph",                  True),
+    ("langchain",             "langchain",                  True),
+    ("langchain_google_genai","langchain-google-genai",     True),
+    ("langchain_community",   "langchain-community",        True),
+    ("qdrant_client",         "qdrant-client",              True),
+    ("sentence_transformers", "sentence-transformers",      True),
+    ("torch",                 "torch",                      True),
+    ("docling",               "docling",                    True),   # replaces openkb
+    ("fitz",                  "pymupdf",                    True),   # fallback parser
+    ("flashrank",             "flashrank",                  False),  # reranker (optional)
+    ("pythainlp",             "pythainlp",                  False),  # Thai NLP (Phase 2)
+    ("tenacity",              "tenacity",                   True),
+    ("loguru",                "loguru",                     True),
+    ("httpx",                 "httpx",                      True),
 ]
+
 
 def check_packages(auto_fix: bool) -> None:
     section("Python Packages")
@@ -103,258 +96,133 @@ def check_packages(auto_fix: bool) -> None:
             "--break-system-packages",
             *missing_critical,
         ])
-        print(ok("Installed. Re-run preflight to verify."))
-    elif missing_critical:
-        errors.append(f"Missing packages: {', '.join(missing_critical)}")
+        print(ok("Installed critical packages."))
+
+    if missing_critical and not auto_fix:
+        errors.append(f"Missing critical packages: {missing_critical}")
+    if missing_optional:
+        warnings.append(f"Missing optional packages: {missing_optional}")
 
 
 # ── 3. Environment variables ──────────────────────────────────
+REQUIRED_ENV = [
+    ("GEMINI_API_KEY", True),
+    ("QDRANT_URL",     False),
+]
+
 def check_env() -> None:
-    section("Environment Variables (.env)")
+    import os
+    from pathlib import Path
 
+    section("Environment Variables")
+
+    # try loading .env
     env_path = Path(".env")
-    if not env_path.exists():
-        print(fail(".env file not found — copy .env.example → .env and fill in values"))
-        errors.append(".env missing")
-        return
-    print(ok(".env file exists"))
+    if env_path.exists():
+        print(ok(f".env file found at {env_path.resolve()}"))
+        try:
+            from dotenv import load_dotenv
+            load_dotenv()
+        except ImportError:
+            pass
+    else:
+        print(warn(".env file not found — using system env vars"))
 
-    # load without pydantic-settings so preflight is standalone
-    env_vars: dict[str, str] = {}
-    for line in env_path.read_text().splitlines():
-        line = line.strip()
-        if line and not line.startswith("#") and "=" in line:
-            k, _, v = line.partition("=")
-            env_vars[k.strip()] = v.strip()
-
-    REQUIRED_VARS = [
-        ("GEMINI_API_KEY",    True,  "Gemini API key from https://aistudio.google.com"),
-        ("QDRANT_URL",        True,  "e.g. http://localhost:6333"),
-        ("OPENKB_URL",        True,  "e.g. http://localhost:3000"),
-        ("EMBEDDING_MODEL",   False, "default: BAAI/bge-m3"),
-        ("LITELLM_DROP_PARAMS", True, "must be 'True' for Gemini"),
-    ]
-
-    for var, critical, hint in REQUIRED_VARS:
-        val = env_vars.get(var) or os.environ.get(var, "")
+    for key, required in REQUIRED_ENV:
+        val = os.environ.get(key)
         if val:
-            # mask secrets
-            display = val[:6] + "..." if "KEY" in var or "SECRET" in var else val
-            print(ok(f"{var} = {display}"))
-        elif critical:
-            print(fail(f"{var} not set  →  {hint}"))
-            errors.append(f"Missing env: {var}")
+            masked = val[:6] + "..." if len(val) > 6 else "***"
+            print(ok(f"{key} = {masked}"))
+        elif required:
+            print(fail(f"{key} not set — REQUIRED"))
+            errors.append(f"Missing env: {key}")
         else:
-            print(warn(f"{var} not set (optional)  →  {hint}"))
-
-    # check LITELLM specifically
-    val = env_vars.get("LITELLM_DROP_PARAMS", "")
-    if val.lower() != "true":
-        print(fail("LITELLM_DROP_PARAMS must be 'True' (Gemini will fail otherwise)"))
-        errors.append("LITELLM_DROP_PARAMS not True")
+            print(warn(f"{key} not set (optional — will use default)"))
 
 
-# ── 4. Docker + services ──────────────────────────────────────
-def check_docker() -> None:
-    section("Docker & Services")
-
-    # docker binary
-    ok_d, out_d = _run_cmd("docker --version")
-    if ok_d:
-        print(ok(f"Docker: {out_d}"))
-    else:
-        print(fail("Docker not found — install from https://docker.com"))
-        errors.append("Docker not installed")
-        return
-
-    # docker compose v2
-    ok_c, out_c = _run_cmd("docker compose version")
-    if ok_c:
-        print(ok(f"Docker Compose: {out_c}"))
-    else:
-        ok_c2, out_c2 = _run_cmd("docker-compose --version")
-        if ok_c2:
-            print(ok(f"docker-compose: {out_c2}"))
-        else:
-            print(fail("Neither 'docker compose' nor 'docker-compose' found"))
-            errors.append("Docker Compose not found")
-
-
-def check_services() -> None:
-    section("Running Services (Qdrant + OpenKB)")
-    import urllib.request
-    import urllib.error
-
-    SERVICES = [
-        ("Qdrant", "http://localhost:6333/healthz"),
-        # OpenKB is a pip library — no service to check
-    ]
-
-    for name, url in SERVICES:
-        try:
-            with urllib.request.urlopen(url, timeout=3) as r:
-                print(ok(f"{name} reachable at {url}  [{r.status}]"))
-        except urllib.error.HTTPError as e:
-            # any HTTP response means service is up
-            print(ok(f"{name} reachable at {url}  [{e.code}]"))
-        except Exception as e:
-            print(warn(f"{name} not reachable at {url} — start with: docker compose up -d"))
-            warnings.append(f"{name} not running")
-
-
-# ── 5. File structure ─────────────────────────────────────────
-def check_files() -> None:
-    section("Project File Structure")
-
-    REQUIRED_FILES = [
-        "api/main.py",
-        "api/config.py",
-        "api/agent/graph.py",
-        "api/agent/state.py",
-        "api/agent/nodes/classify.py",
-        "api/agent/nodes/clarify.py",
-        "api/agent/nodes/retrieve.py",
-        "api/agent/nodes/clinical_reason.py",
-        "api/agent/nodes/safety_gate.py",
-        "api/agent/nodes/recommendation.py",
-        "api/agent/nodes/format.py",
-        "api/knowledge/ingest.py",
-        "api/knowledge/retriever.py",
-        "api/session/memory.py",
-        "api/prompts/pharmacist.py",
-        "api/routers/chat.py",
-        "api/routers/health.py",
-        "requirements.txt",
-        "docker-compose.yml",
-        ".env",
-    ]
-
-    REQUIRED_DIRS = [
-        "data/guidelines",
-        "web",
-    ]
-
-    for f in REQUIRED_FILES:
-        p = Path(f)
-        if p.exists():
-            print(ok(f))
-        else:
-            print(fail(f"Missing: {f}"))
-            errors.append(f"Missing file: {f}")
-
-    for d in REQUIRED_DIRS:
-        p = Path(d)
-        if p.is_dir():
-            print(ok(f"{d}/"))
-        else:
-            print(warn(f"Missing dir: {d}/  (create it)"))
-            warnings.append(f"Missing dir: {d}")
-
-    # check PDFs exist
-    pdf_files = list(Path("data/guidelines").glob("*.pdf")) if Path("data/guidelines").is_dir() else []
-    if pdf_files:
-        print(ok(f"PDFs found: {[p.name for p in pdf_files]}"))
-    else:
-        print(warn("No PDFs in data/guidelines/ — run ingest after adding them"))
-        warnings.append("No PDFs found")
-
-
-# ── 6. Quick import smoke test ────────────────────────────────
-def check_imports() -> None:
-    section("Critical Import Smoke Test")
-
-    tests = [
-        ("langgraph.graph",          "StateGraph"),
-        ("langchain_google_genai",   "ChatGoogleGenerativeAI"),
-        ("qdrant_client",            "QdrantClient"),
-        ("sentence_transformers",    "SentenceTransformer"),
-    ]
-
-    for module, cls in tests:
-        try:
-            mod = importlib.import_module(module)
-            getattr(mod, cls)
-            print(ok(f"from {module} import {cls}"))
-        except (ImportError, AttributeError) as e:
-            print(fail(f"from {module} import {cls}  →  {e}"))
-            errors.append(f"Import failed: {module}.{cls}")
-
-
-# ── 7. Node.js / npm ──────────────────────────────────────────
-def _run_cmd(cmd: str) -> tuple[bool, str]:
-    """Cross-platform command runner — uses shell=True on Windows."""
+# ── 4. Qdrant connectivity ────────────────────────────────────
+def check_qdrant() -> None:
+    section("Qdrant Connection")
     try:
-        result = subprocess.run(
-            cmd,
-            shell=True,           # ← Windows needs this for npm/node in PATH
-            capture_output=True,
-            text=True,
-        )
-        return result.returncode == 0, result.stdout.strip() or result.stderr.strip()
-    except (FileNotFoundError, OSError):
-        return False, "not found"
+        from qdrant_client import QdrantClient
+        from api.config import get_settings
+        cfg = get_settings()
+        client = QdrantClient(url=cfg.qdrant_url, timeout=5)
+        collections = client.get_collections().collections
+        print(ok(f"Connected to {cfg.qdrant_url} — {len(collections)} collection(s)"))
 
-
-def check_node() -> None:
-    section("Node.js (Frontend)")
-
-    for cmd, label in [("node --version", "Node.js"), ("npm --version", "npm")]:
-        success, output = _run_cmd(cmd)
-        if success:
-            print(ok(f"{label}: {output}"))
+        if cfg.qdrant_collection in [c.name for c in collections]:
+            info_data = client.get_collection(cfg.qdrant_collection)
+            count = info_data.points_count
+            if count and count > 0:
+                print(ok(f"Collection '{cfg.qdrant_collection}' has {count} vectors"))
+            else:
+                print(warn(f"Collection '{cfg.qdrant_collection}' is EMPTY — run ingestion"))
+                warnings.append("Qdrant collection empty")
         else:
-            print(warn(f"{label} not found — needed only for frontend dev"))
-            warnings.append(f"{label} not found")
+            print(warn(f"Collection '{cfg.qdrant_collection}' does not exist — run ingestion"))
+            warnings.append("Qdrant collection missing")
 
-    # check web/node_modules
-    if Path("web/node_modules").is_dir():
-        print(ok("web/node_modules exists"))
-    else:
-        print(warn("web/node_modules missing — run: cd web && npm install"))
-        warnings.append("npm install not done")
+    except Exception as exc:
+        print(fail(f"Qdrant error: {exc}"))
+        print(info("Hint: docker compose up -d qdrant"))
+        errors.append("Qdrant unreachable")
 
 
-# ── summary ───────────────────────────────────────────────────
-def print_summary() -> None:
-    section("Summary")
+# ── 5. Embedding model ────────────────────────────────────────
+def check_embedding() -> None:
+    section("BGE-M3 Embedding Model")
+    try:
+        from sentence_transformers import SentenceTransformer
+        from api.config import get_settings
+        cfg = get_settings()
+        print(info(f"Loading {cfg.embedding_model} on {cfg.embedding_device}..."))
+        model = SentenceTransformer(cfg.embedding_model, device=cfg.embedding_device)
+        vec = model.encode("test", normalize_embeddings=True)
+        print(ok(f"Model loaded — dim={len(vec)}"))
+    except Exception as exc:
+        print(fail(f"Embedding error: {exc}"))
+        errors.append("Embedding model failed")
 
-    if not errors and not warnings:
-        print(f"\n{GREEN}{BOLD}✅ All checks passed — system ready to run!{RESET}\n")
-    elif not errors:
-        print(f"\n{YELLOW}{BOLD}⚠️  {len(warnings)} warning(s) — system should work but check above{RESET}")
-        for w in warnings:
-            print(f"  {YELLOW}•{RESET} {w}")
-        print()
-    else:
-        print(f"\n{RED}{BOLD}❌ {len(errors)} error(s) must be fixed before running:{RESET}")
-        for e in errors:
-            print(f"  {RED}•{RESET} {e}")
-        if warnings:
-            print(f"\n{YELLOW}{BOLD}⚠️  {len(warnings)} warning(s):{RESET}")
-            for w in warnings:
-                print(f"  {YELLOW}•{RESET} {w}")
-        print()
-        sys.exit(1)
+
+# ── 6. Docling ────────────────────────────────────────────────
+def check_docling() -> None:
+    section("Docling PDF Parser")
+    try:
+        from docling.document_converter import DocumentConverter
+        print(ok("docling import OK"))
+    except ImportError as exc:
+        print(fail(f"docling not available: {exc}"))
+        print(info("pip install docling"))
+        errors.append("docling missing")
 
 
 # ── entrypoint ────────────────────────────────────────────────
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="PharmBot preflight checker")
-    parser.add_argument("--fix", action="store_true", help="Auto-install missing Python packages")
-    parser.add_argument("--skip-services", action="store_true", help="Skip Qdrant/OpenKB connectivity check")
+    import argparse
+    parser = argparse.ArgumentParser(description="PharmBot pre-flight check")
+    parser.add_argument("--fix",     action="store_true", help="Auto-install missing packages")
+    parser.add_argument("--skip-ml", action="store_true", help="Skip slow ML model checks")
     args = parser.parse_args()
-
-    print(f"\n{BOLD}{CYAN}{'═'*50}{RESET}")
-    print(f"{BOLD}{CYAN}  PharmBot — Pre-flight Check{RESET}")
-    print(f"{BOLD}{CYAN}{'═'*50}{RESET}")
 
     check_python()
     check_packages(auto_fix=args.fix)
     check_env()
-    check_docker()
-    if not args.skip_services:
-        check_services()
-    check_files()
-    check_imports()
-    check_node()
-    print_summary()
+    check_qdrant()
+    check_docling()
+    if not args.skip_ml:
+        check_embedding()
+
+    print(f"\n{'─'*50}")
+    if errors:
+        print(f"\n{RED}{BOLD}✗ {len(errors)} error(s):{RESET}")
+        for e in errors:
+            print(f"  {RED}• {e}{RESET}")
+        sys.exit(1)
+    elif warnings:
+        print(f"\n{YELLOW}{BOLD}⚠ {len(warnings)} warning(s):{RESET}")
+        for w in warnings:
+            print(f"  {YELLOW}• {w}{RESET}")
+        print(f"\n{GREEN}{BOLD}Pre-flight passed with warnings.{RESET}\n")
+    else:
+        print(f"\n{GREEN}{BOLD}✓ All checks passed.{RESET}\n")

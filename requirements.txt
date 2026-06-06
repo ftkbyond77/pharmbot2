@@ -3,10 +3,6 @@ langgraph>=0.2.0
 langchain>=0.2.0
 langchain-google-genai>=1.0.0      # Gemini via LangChain
 langchain-community>=0.2.0
-litellm>=1.40.0                    # used by openkb internally
-
-# ── OpenKB (KB manager + ingestion) ──────────────────────────
-openkb>=0.1.0
 
 # ── Vector Store ─────────────────────────────────────────────
 qdrant-client>=1.9.0
@@ -15,12 +11,14 @@ qdrant-client>=1.9.0
 sentence-transformers>=3.0.0       # SentenceTransformer("BAAI/bge-m3")
 torch>=2.0.0                       # required by sentence-transformers
 #   CUDA 12.1: pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
-#   CUDA 12.4: pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124 -> match witn torch >= 2.6
+#   CUDA 12.4: pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
 
+# ── PDF Parsing (docling replaces openkb + unstructured) ──────
+docling>=2.0.0                     # IBM docling — handles tables, images, Thai CID
+pymupdf>=1.24.0                    # PyMuPDF — fast fallback for large/corrupt PDFs
 
-# ── PDF Parsing ──────────────────────────────────────────────
-unstructured[pdf]>=0.14.0          # Unstructured.io
-pymupdf>=1.24.0                    # PyMuPDF (fitz) — fast fallback
+# ── Reranking ─────────────────────────────────────────────────
+flashrank>=0.2.9                   # lightweight cross-encoder reranker (no GPU required)
 
 # ── Thai NLP ─────────────────────────────────────────────────
 pythainlp>=5.0.0                   # NER + tokenize (Phase 2 KG)

@@ -3,18 +3,25 @@ agent/nodes/classify.py
 -----------------------
 Node 1: Intent classification
 
-Input  : state.user_message
+Changes from original:
+- Passes conversation history into prompt (context-aware classification)
+- Routing uses config.no_clarify_intents (not hard-coded "drug_info")
+- Better JSON parsing with detailed debug logging
+
+Input  : state.user_message, state.history
 Output : state.intent, state.next_action
 """
 
+from __future__ import annotations
+
 import json
-from loguru import logger
+
 from langchain_google_genai import ChatGoogleGenerativeAI
+from loguru import logger
 
 from api.agent.state import AgentState
 from api.config import get_settings
-from api.prompts.pharmacist import SYSTEM_PROMPT, classify_prompt
-from api.prompts.pharmacist import strip_fences
+from api.prompts.pharmacist import SYSTEM_PROMPT, classify_prompt, strip_fences
 
 
 def classify_node(state: AgentState) -> dict:
@@ -22,35 +29,47 @@ def classify_node(state: AgentState) -> dict:
     llm = ChatGoogleGenerativeAI(
         model=cfg.gemini_model,
         google_api_key=cfg.gemini_api_key,
-        temperature=0,
+        temperature=cfg.llm_temp_classify,
     )
 
-    prompt = classify_prompt(state["user_message"])
+    prompt = classify_prompt(
+        user_message=state["user_message"],
+        history=state.get("history", []),
+    )
     response = llm.invoke([
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user",   "content": prompt},
     ])
 
+    intent = "unknown"
+    reason = ""
     try:
-        raw = response.content.strip()
-        # strip markdown fences if model adds them
-        if raw.startswith("```"):
-            raw = raw.split("```")[1]
-            if raw.startswith("json"):
-                raw = raw[4:]
+        raw  = strip_fences(response.content)
         data = json.loads(raw)
         intent = data.get("intent", "unknown")
-    except Exception as e:
-        logger.warning(f"classify_node parse error: {e} — defaulting to 'unknown'")
+        reason = data.get("reason", "")
+    except Exception as exc:
+        logger.warning(f"[classify] JSON parse error: {exc} | raw: {response.content[:200]}")
+
+    # validate — catch hallucinated values
+    valid_intents = {"symptom", "drug_info", "general_pharma", "unknown"}
+    if intent not in valid_intents:
+        logger.warning(f"[classify] invalid intent '{intent}' → fallback 'unknown'")
         intent = "unknown"
 
-    logger.info(f"[classify] intent={intent}")
+    logger.info(f"[classify] intent={intent} | reason={reason}")
 
-    # route: unknown → still go to clarify so bot can ask what's wrong
-    next_action = "clarify" if intent in ("symptom", "general_pharma", "unknown") else "retrieve"
+    # configurable: which intents skip clarify and go straight to retrieve
+    no_clarify = set(cfg.no_clarify_intents)
+    if intent in no_clarify:
+        next_action = "retrieve"
+        logger.debug(f"[classify] intent '{intent}' in no_clarify_intents → retrieve")
+    else:
+        next_action = "clarify"
+        logger.debug(f"[classify] intent '{intent}' → clarify")
 
     return {
-        "intent": intent,
+        "intent":      intent,
         "next_action": next_action,
-        "clarify_round": 0,
+        "clarify_round": state.get("clarify_round", 0),  # preserve existing round count
     }
