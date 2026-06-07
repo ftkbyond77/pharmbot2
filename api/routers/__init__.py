@@ -1,4 +1,5 @@
-from .chat   import router as chat_router
-from .health import router as health_router
-
-__all__ = ["chat_router", "health_router"]
+from .chat       import router as chat_router
+from .health     import router as health_router
+from .test_cases import router as test_cases_router
+ 
+__all__ = ["chat_router", "health_router", "test_cases_router"]

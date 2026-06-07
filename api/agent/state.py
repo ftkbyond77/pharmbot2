@@ -1,8 +1,16 @@
 """
-agent/state.py
---------------
+agent/state.py  (v2 — Tuned)
+------------------------------
 Single source of truth for all data flowing through the graph.
 LangGraph merges partial dicts returned by each node into the state.
+
+CHANGES v2:
+- Added symptom_domain, symptom_complexity (from clarify node)
+- Added clinical_scores (Centor, AOM, Sinusitis from clinical_reason)
+- Added needs_pushback, pushback_reason (Negative Case handling)
+- Added diagnosis_flow, antibiotic_indicated, supportive_care (from recommendation)
+- Added first_line_drug, alternatives (exposed directly)
+- Added knowledge_gaps for debugging
 """
 
 from __future__ import annotations
@@ -13,11 +21,12 @@ from typing import Annotated, Any, Literal
 from typing_extensions import TypedDict
 
 
-# ── sub-types ──────────────────────────────────────────────────
+# ── Sub-types ──────────────────────────────────────────────────
 
 class DDxItem(TypedDict):
     name:       str
     confidence: Literal["high", "medium", "low"]
+    reasoning:  str  # v2: added reasoning field
 
 
 class RetrievedChunk(TypedDict):
@@ -26,44 +35,64 @@ class RetrievedChunk(TypedDict):
     score:  float
 
 
-# ── main state ─────────────────────────────────────────────────
+# ── Main State ─────────────────────────────────────────────────
 
 class AgentState(TypedDict):
 
-    # ── conversation ─────────────────────────────────────────
+    # ── Conversation ─────────────────────────────────────────
     session_id:   str
     user_message: str                                      # latest user input
     history:      Annotated[list[dict], operator.add]      # append-only
 
-    # ── intent classification ────────────────────────────────
+    # ── Intent classification ────────────────────────────────
     intent: Literal["symptom", "drug_info", "general_pharma", "unknown"]
 
-    # ── clarification loop ───────────────────────────────────
+    # ── Clarification loop ───────────────────────────────────
     clarify_round:         int           # 0–max_clarify_rounds
     completeness_score:    float         # 0.0–1.0
     clarifying_question:   str | None    # question to ask user
 
-    # ── retrieval ────────────────────────────────────────────
+    # v2: domain + complexity awareness
+    symptom_domain:        str           # "ear" | "throat" | "sinus_nasal" | "general"
+    symptom_complexity:    str           # "simple" | "moderate" | "complex"
+
+    # ── Retrieval ────────────────────────────────────────────
     retrieved_chunks: list[RetrievedChunk]
 
-    # ── clinical reasoning ───────────────────────────────────
+    # ── Clinical Reasoning ───────────────────────────────────
     symptom_summary:         list[str]       # extracted symptom list
     differential_diagnosis:  list[DDxItem]
     clinical_rationale:      list[str]       # human-readable rationale
     red_flags_found:         list[str]       # empty = all clear
+    knowledge_gaps:          list[str]       # topics not in guideline
 
-    # ── recommendation ───────────────────────────────────────
-    recommendation:    str | None
-    sources:           list[str]
-    refer_to_doctor:   bool
-    refer_reason:      str | None
+    # v2: clinical scores
+    clinical_scores: dict[str, Any]          # centor_score, aom_severity, sinusitis_criteria
 
-    # ── recommendation extras (from augmented generation) ────
-    _first_line_drug:  str | None           # e.g. "paracetamol 500mg"
-    _alternatives:     list[str]            # when allergic / contraindicated
+    # v2: Negative case handling
+    needs_pushback:   bool
+    pushback_reason:  str | None
 
-    # ── flow control ─────────────────────────────────────────
+    # ── Safety Gate ──────────────────────────────────────────
+    refer_to_doctor:  bool
+    refer_reason:     str | None
+
+    # ── Recommendation ───────────────────────────────────────
+    recommendation:   str | None
+    sources:          list[str]
+    first_line_drug:  str | None           # e.g. "Amoxicillin 500mg q8h × 10d"
+    alternatives:     list[str]            # when allergic / contraindicated
+    when_to_see_doctor: str | None
+
+    # v2: recommendation extras
+    diagnosis_flow:       str | None       # "อาการ → Centor 4 → GABHS likely → Amoxicillin"
+    antibiotic_indicated: bool             # True if ATB is recommended
+    supportive_care:      list[str]        # list of self-care recommendations
+    pushback_message:     str | None       # polite correction message for negative cases
+    augmented_notes:      str | None       # notes from general clinical knowledge
+
+    # ── Flow Control ─────────────────────────────────────────
     next_action: str   # "clarify" | "retrieve" | "refer" | "recommend" | "done"
 
-    # ── terminal output (set by format node) ─────────────────
+    # ── Terminal Output (set by format node) ─────────────────
     final_response: dict[str, Any] | None

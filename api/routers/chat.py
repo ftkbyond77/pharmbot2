@@ -1,9 +1,15 @@
 """
-routers/chat.py
----------------
+routers/chat.py  (v2 — Tuned)
+------------------------------
 POST   /chat                        — main chat endpoint
 GET    /chat/{session_id}/history   — retrieve session history
 DELETE /chat/{session_id}           — clear session
+
+CHANGES v2:
+- _empty_state includes all new v2 fields (symptom_domain, clinical_scores, etc.)
+- ChatResponse includes v2 extras (diagnosis_flow, antibiotic_indicated,
+  pushback_message, supportive_care, clinical_scores)
+- DiagnosisItem includes reasoning field
 """
 
 from __future__ import annotations
@@ -22,10 +28,10 @@ from api.session.memory import SessionStore, get_store
 router = APIRouter(prefix="/chat", tags=["chat"])
 
 
-# ── schemas ────────────────────────────────────────────────────
+# ── Schemas ────────────────────────────────────────────────────
 
 class ChatRequest(BaseModel):
-    message:    str      = Field(..., min_length=1, max_length=2000)
+    message:    str       = Field(..., min_length=1, max_length=2000)
     session_id: str | None = Field(
         default=None,
         description="Omit on first message — server generates one",
@@ -34,25 +40,34 @@ class ChatRequest(BaseModel):
 
 class DiagnosisItem(BaseModel):
     name:       str
-    confidence: str   # "high" | "medium" | "low"
+    confidence: str           # "high" | "medium" | "low"
+    reasoning:  str = ""      # v2: clinical reasoning for this DDx item
 
 
 class ChatResponse(BaseModel):
-    session_id:          str
-    type:                str                    # "clarify" | "recommendation" | "refer"
-    message:             str
-    diagnosis:           list[DiagnosisItem] = []
-    recommendation:      str | None = None
-    sources:             list[str] = []
-    red_flags:           list[str] = []
-    refer_to_doctor:     bool = False
-    clarifying_question: str | None = None
-    # extras (optional — consumed by richer frontend)
-    first_line_drug:     str | None = None
-    alternatives:        list[str] = []
+    session_id:           str
+    type:                 str               # "clarify" | "normal" | "refer"
+    message:              str
+    diagnosis:            list[DiagnosisItem] = []
+    recommendation:       str | None = None
+    sources:              list[str]  = []
+    red_flags:            list[str]  = []
+    refer_to_doctor:      bool = False
+    clarifying_question:  str | None = None
+
+    # v2 extras
+    first_line_drug:      str | None = None
+    alternatives:         list[str]  = []
+    diagnosis_flow:       str | None = None
+    antibiotic_indicated: bool = False
+    pushback_message:     str | None = None
+    supportive_care:      list[str]  = []
+    when_to_see_doctor:   str | None = None
+    clinical_scores:      dict | None = None
+    augmented_notes:      str | None = None
 
 
-# ── helpers ────────────────────────────────────────────────────
+# ── Helpers ────────────────────────────────────────────────────
 
 def _get_or_create_session(
     session_id: str | None,
@@ -71,26 +86,59 @@ def _get_or_create_session(
 
 def _empty_state(session_id: str) -> dict[str, Any]:
     return {
+        # conversation
         "session_id":             session_id,
         "user_message":           "",
         "history":                [],
+
+        # intent
         "intent":                 "unknown",
+
+        # clarify
         "clarify_round":          0,
         "completeness_score":     0.0,
         "clarifying_question":    None,
+        "symptom_domain":         "general",    # v2
+        "symptom_complexity":     "moderate",   # v2
+
+        # retrieval
         "retrieved_chunks":       [],
+
+        # clinical reason
         "symptom_summary":        [],
         "differential_diagnosis": [],
         "clinical_rationale":     [],
         "red_flags_found":        [],
-        "recommendation":         None,
-        "sources":                [],
+        "knowledge_gaps":         [],           # v2
+        "clinical_scores":        {},           # v2
+
+        # negative case
+        "needs_pushback":         False,        # v2
+        "pushback_reason":        None,         # v2
+
+        # safety gate
         "refer_to_doctor":        False,
         "refer_reason":           None,
+
+        # recommendation
+        "recommendation":         None,
+        "sources":                [],
+        "first_line_drug":        None,         # v2 (renamed from _first_line_drug)
+        "alternatives":           [],           # v2 (renamed from _alternatives)
+        "when_to_see_doctor":     None,         # v2
+
+        # recommendation extras
+        "diagnosis_flow":         None,         # v2
+        "antibiotic_indicated":   False,        # v2
+        "supportive_care":        [],           # v2
+        "pushback_message":       None,         # v2
+        "augmented_notes":        None,         # v2
+
+        # flow control
         "next_action":            "clarify",
+
+        # terminal
         "final_response":         None,
-        "_first_line_drug":       None,
-        "_alternatives":          [],
     }
 
 
@@ -99,7 +147,7 @@ def _append_history(state: dict, role: str, content: str) -> None:
     state["history"].append({"role": role, "content": content})
 
 
-# ── endpoints ──────────────────────────────────────────────────
+# ── Endpoints ──────────────────────────────────────────────────
 
 @router.post("", response_model=ChatResponse)
 async def chat(
@@ -132,18 +180,36 @@ async def chat(
     # persist updated state
     store.set(sid, result)
 
+    # Build DiagnosisItem list (handle both dict and TypedDict)
+    diagnosis_items = []
+    for d in final.get("diagnosis", []):
+        if isinstance(d, dict):
+            diagnosis_items.append(DiagnosisItem(
+                name=d.get("name", ""),
+                confidence=d.get("confidence", "low"),
+                reasoning=d.get("reasoning", ""),
+            ))
+
     return ChatResponse(
-        session_id          = sid,
-        type                = final.get("type", "recommendation"),
-        message             = bot_message,
-        diagnosis           = [DiagnosisItem(**d) for d in final.get("diagnosis", [])],
-        recommendation      = final.get("recommendation"),
-        sources             = final.get("sources", []),
-        red_flags           = final.get("red_flags", []),
-        refer_to_doctor     = final.get("refer_to_doctor", False),
-        clarifying_question = final.get("clarifying_question"),
-        first_line_drug     = result.get("_first_line_drug"),
-        alternatives        = result.get("_alternatives", []),
+        session_id           = sid,
+        type                 = final.get("type", "normal"),
+        message              = bot_message,
+        diagnosis            = diagnosis_items,
+        recommendation       = final.get("recommendation"),
+        sources              = final.get("sources", []),
+        red_flags            = final.get("red_flags", []),
+        refer_to_doctor      = final.get("refer_to_doctor", False),
+        clarifying_question  = final.get("clarifying_question"),
+        # v2 fields
+        first_line_drug      = final.get("first_line_drug"),
+        alternatives         = final.get("alternatives", []),
+        diagnosis_flow       = final.get("diagnosis_flow"),
+        antibiotic_indicated = final.get("antibiotic_indicated", False),
+        pushback_message     = final.get("pushback_message"),
+        supportive_care      = final.get("supportive_care", []),
+        when_to_see_doctor   = final.get("when_to_see_doctor"),
+        clinical_scores      = final.get("clinical_scores"),
+        augmented_notes      = final.get("augmented_notes"),
     )
 
 
@@ -160,6 +226,7 @@ async def get_history(
         "history":    state.get("history", []),
         "rounds":     state.get("clarify_round", 0),
         "intent":     state.get("intent", "unknown"),
+        "domain":     state.get("symptom_domain", "general"),
     }
 
 

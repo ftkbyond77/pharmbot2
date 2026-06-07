@@ -1,17 +1,20 @@
 """
-agent/nodes/clinical_reason.py
--------------------------------
+agent/nodes/clinical_reason.py  (v2 — Tuned)
+----------------------------------------------
 Node 4: Clinical reasoning — Augmented Generation
 
-Improvements:
-- Passes conversation history to prompt (not just user_message)
-- Prompt now supports grounding (guideline) + augmentation (general knowledge)
-- knowledge_gaps extracted → can trigger Phase 2 web-search hook
+CHANGES v2:
+- Extracts clinical_scores (Centor, AOM severity, sinusitis criteria) from LLM
+- Extracts needs_pushback + pushback_reason for Negative Case handling
+- Passes symptom_domain + symptom_complexity from clarify into query building
 - Structured parse with graceful degradation per field
 
-Input  : state.user_message, state.history, state.retrieved_chunks
+Input  : state.user_message, state.history, state.retrieved_chunks,
+         state.symptom_domain, state.symptom_complexity
 Output : state.symptom_summary, state.differential_diagnosis,
-         state.clinical_rationale, state.red_flags_found, state.next_action
+         state.clinical_rationale, state.red_flags_found,
+         state.clinical_scores, state.needs_pushback, state.pushback_reason,
+         state.next_action
 """
 
 from __future__ import annotations
@@ -44,10 +47,7 @@ def clinical_reason_node(state: AgentState) -> dict:
     history      = state.get("history", [])
     history_text = _format_history_full(history, max_turns=6)
 
-    # Build symptom narrative from full history
     symptom_text = _build_symptom_narrative(state)
-
-    # Format retrieved context with citations
     context_text = retriever.format_context(state.get("retrieved_chunks", []))
 
     prompt   = clinical_reason_prompt(symptom_text, context_text, history_text)
@@ -56,12 +56,15 @@ def clinical_reason_node(state: AgentState) -> dict:
         {"role": "user",   "content": prompt},
     ])
 
-    # ── parse with field-level graceful degradation ───────────
-    symptom_summary: list[str] = []
-    ddx: list[DDxItem]         = []
-    rationale: list[str]       = []
-    red_flags: list[str]       = []
-    knowledge_gaps: list[str]  = []
+    # ── Parse with field-level graceful degradation ───────────
+    symptom_summary: list[str]  = []
+    ddx: list[DDxItem]          = []
+    rationale: list[str]        = []
+    red_flags: list[str]        = []
+    knowledge_gaps: list[str]   = []
+    clinical_scores: dict       = {}
+    needs_pushback: bool        = False
+    pushback_reason: str | None = None
 
     try:
         raw  = strip_fences(response.content)
@@ -72,80 +75,84 @@ def clinical_reason_node(state: AgentState) -> dict:
         rationale       = _ensure_list(data.get("clinical_rationale", []))
         red_flags       = _ensure_list(data.get("red_flags", []))
         knowledge_gaps  = _ensure_list(data.get("knowledge_gaps", []))
+        clinical_scores = data.get("clinical_scores", {}) or {}
+        needs_pushback  = bool(data.get("needs_pushback", False))
+        pushback_reason = data.get("pushback_reason")
 
     except json.JSONDecodeError as exc:
-        logger.warning(f"[clinical_reason] JSON parse failed: {exc} | using fallback")
-        symptom_summary = [state["user_message"]]
-    except Exception as exc:
-        logger.error(f"[clinical_reason] unexpected error: {exc}")
-        symptom_summary = [state["user_message"]]
+        logger.warning(f"[clinical_reason] JSON parse failed: {exc} — using raw text")
+        symptom_summary = [symptom_text[:200]]
 
     logger.info(
-        f"[clinical_reason] symptoms={len(symptom_summary)} "
-        f"ddx={len(ddx)} red_flags={red_flags} gaps={knowledge_gaps}"
+        f"[clinical_reason] ddx={[d['name'] for d in ddx[:3]]} "
+        f"red_flags={red_flags} needs_pushback={needs_pushback} "
+        f"centor={clinical_scores.get('centor_score')} "
+        f"aom={clinical_scores.get('aom_severity')}"
     )
 
-    # Surface knowledge gaps for debugging / Phase 2 web search
-    if knowledge_gaps:
-        logger.debug(f"[clinical_reason] knowledge_gaps: {knowledge_gaps}")
-
     return {
-        "symptom_summary":        symptom_summary,
-        "differential_diagnosis": ddx,
-        "clinical_rationale":     rationale,
-        "red_flags_found":        red_flags,
-        "next_action":            "safety_gate",
+        "symptom_summary":         symptom_summary,
+        "differential_diagnosis":  ddx,
+        "clinical_rationale":      rationale,
+        "red_flags_found":         red_flags,
+        "knowledge_gaps":          knowledge_gaps,
+        "clinical_scores":         clinical_scores,
+        "needs_pushback":          needs_pushback,
+        "pushback_reason":         pushback_reason,
+        "next_action":             "safety_gate",
     }
 
 
+# ── helpers ───────────────────────────────────────────────────
+
 def _build_symptom_narrative(state: AgentState) -> str:
     """
-    Aggregate all user messages into a readable symptom narrative.
-    Prioritise extracted symptom_summary from prior rounds if available.
+    Build a rich symptom narrative:
+    1. Use prior symptom_summary if available (from clarify rounds)
+    2. Augment with domain/complexity info
+    3. Fall back to recent user turns
     """
-    prior_summary = state.get("symptom_summary", [])
-    if prior_summary:
-        return " | ".join(prior_summary)
+    symptom_summary: list[str] = state.get("symptom_summary", [])
+    domain      = state.get("symptom_domain", "general")
+    complexity  = state.get("symptom_complexity", "moderate")
+
+    if symptom_summary:
+        base = " | ".join(symptom_summary)
+        return f"[Domain: {domain}, Complexity: {complexity}] {base}"
 
     history = state.get("history", [])
-    user_msgs = [
-        h["content"] for h in history if h.get("role") == "user"
-    ]
-    if not user_msgs:
-        return state.get("user_message", "")
+    user_turns = [
+        h["content"]
+        for h in history
+        if h.get("role") == "user"
+    ][-4:]
 
-    # add latest message if not already included
-    latest = state.get("user_message", "")
-    if latest and (not user_msgs or user_msgs[-1] != latest):
-        user_msgs.append(latest)
-
-    return "\n".join(f"- {m}" for m in user_msgs)
+    parts = user_turns + [state["user_message"]]
+    narrative = " ".join(p.strip() for p in parts if p.strip())
+    return f"[Domain: {domain}, Complexity: {complexity}] {narrative}"
 
 
-def _parse_ddx(raw_list: list) -> list[DDxItem]:
-    """Parse DDx list with validation."""
+def _ensure_list(val) -> list:
+    if isinstance(val, list):
+        return [str(v) for v in val if v]
+    if val:
+        return [str(val)]
+    return []
+
+
+def _parse_ddx(raw_ddx) -> list[DDxItem]:
+    if not isinstance(raw_ddx, list):
+        return []
     result = []
-    valid_confidence = {"high", "medium", "low"}
-    for item in raw_list:
+    for item in raw_ddx:
         if not isinstance(item, dict):
             continue
-        name       = str(item.get("name", "")).strip()
-        confidence = str(item.get("confidence", "low")).lower()
-        if confidence not in valid_confidence:
-            confidence = "low"
-        if name:
-            result.append(DDxItem(name=name, confidence=confidence))
+        try:
+            result.append(DDxItem(
+                name=str(item.get("name", "Unknown")),
+                confidence=str(item.get("confidence", "low")),
+                reasoning=str(item.get("reasoning", "")),
+            ))
+        except Exception:
+            pass
     return result
-
-
-_EMPTY_MARKERS = {"ไม่มี", "none", "n/a", "-", "–", "ไม่พบ", ""}
-
-def _ensure_list(val) -> list[str]:
-    if isinstance(val, list):
-        return [
-            str(v).strip() for v in val
-            if v and str(v).strip().lower() not in _EMPTY_MARKERS
-        ]
-    if isinstance(val, str) and val.strip().lower() not in _EMPTY_MARKERS:
-        return [val.strip()]
-    return []

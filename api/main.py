@@ -23,7 +23,8 @@ from api.config import get_settings
 from api.session.memory import init_session_store
 from api.knowledge.retriever import init_retriever
 from api.agent.graph import get_graph
-from api.routers import chat_router, health_router
+from api.routers import chat_router, health_router, test_cases_router
+
 
 
 # ── lifespan ───────────────────────────────────────────────────
@@ -80,6 +81,7 @@ def create_app() -> FastAPI:
     # ── routers ───────────────────────────────────────────────
     app.include_router(health_router)
     app.include_router(chat_router, prefix="/api/v1")
+    app.include_router(test_cases_router, prefix="/api/v1")
 
     return app
 
