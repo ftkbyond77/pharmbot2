@@ -1,15 +1,9 @@
 """
-agent/nodes/classify.py
------------------------
-Node 1: Intent classification
-
-Changes from original:
-- Passes conversation history into prompt (context-aware classification)
-- Routing uses config.no_clarify_intents (not hard-coded "drug_info")
-- Better JSON parsing with detailed debug logging
-
-Input  : state.user_message, state.history
-Output : state.intent, state.next_action
+agent/nodes/classify.py — v2
+Changes vs v1:
+- Extracts topic_shift from LLM response
+- Passes topic_shift into state (used by clarify_node to reset round counter)
+- topic_shift=True → reset context เพื่อไม่ให้ context เก่าปะปน
 """
 
 from __future__ import annotations
@@ -41,13 +35,16 @@ def classify_node(state: AgentState) -> dict:
         {"role": "user",   "content": prompt},
     ])
 
-    intent = "unknown"
-    reason = ""
+    intent      = "unknown"
+    reason      = ""
+    topic_shift = False
+
     try:
         raw  = strip_fences(response.content)
         data = json.loads(raw)
-        intent = data.get("intent", "unknown")
-        reason = data.get("reason", "")
+        intent      = data.get("intent", "unknown")
+        reason      = data.get("reason", "")
+        topic_shift = bool(data.get("topic_shift", False))
     except Exception as exc:
         logger.warning(f"[classify] JSON parse error: {exc} | raw: {response.content[:200]}")
 
@@ -57,7 +54,7 @@ def classify_node(state: AgentState) -> dict:
         logger.warning(f"[classify] invalid intent '{intent}' → fallback 'unknown'")
         intent = "unknown"
 
-    logger.info(f"[classify] intent={intent} | reason={reason}")
+    logger.info(f"[classify] intent={intent} | topic_shift={topic_shift} | reason={reason}")
 
     # configurable: which intents skip clarify and go straight to retrieve
     no_clarify = set(cfg.no_clarify_intents)
@@ -68,8 +65,13 @@ def classify_node(state: AgentState) -> dict:
         next_action = "clarify"
         logger.debug(f"[classify] intent '{intent}' → clarify")
 
+    # ── Topic shift: reset clarify_round ─────────────────────
+    # clarify_node จะอ่าน topic_shift จาก state และ reset round เอง
+    clarify_round = 0 if topic_shift else state.get("clarify_round", 0)
+
     return {
-        "intent":      intent,
-        "next_action": next_action,
-        "clarify_round": state.get("clarify_round", 0),  # preserve existing round count
+        "intent":        intent,
+        "next_action":   next_action,
+        "clarify_round": clarify_round,
+        "topic_shift":   topic_shift,
     }

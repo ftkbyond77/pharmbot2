@@ -1,6 +1,10 @@
 """
-agent/nodes/clarify.py — v4
-Extra fix: ถ้า score ≥ threshold และ missing ว่าง → ไม่ถาม เสมอ
+agent/nodes/clarify.py — v5
+Changes vs v4:
+- ALLERGY GATE: ถ้า domain ต้องการ ATB (AOM/pharyngitis/sinusitis/allergy)
+  และยังไม่มีข้อมูลประวัติแพ้ยาในประวัติสนทนา → บังคับถาม (override score threshold)
+- topic_shift: ถ้า classify บอก topic_shift=True → reset clarify_round เป็น 0
+- ปรับ effective_max: pharyngitis เพิ่มเป็น 3 รอบ (รับ allergy gate)
 """
 from __future__ import annotations
 import json
@@ -12,8 +16,32 @@ from api.prompts.pharmacist import (
     SYSTEM_PROMPT, completeness_prompt, clarify_question_prompt, strip_fences,
 )
 
-# Domains that rarely need clarification when data looks complete
-_FAST_DOMAINS = {"general"}
+# Domains ที่ต้องการ ATB และจึงต้องผ่าน allergy gate
+_ATB_DOMAINS = {"AOM", "pharyngitis", "sinusitis", "allergy"}
+
+# Keywords ที่บ่งบอกว่ามีข้อมูลแพ้ยาแล้วในประวัติ (ครอบคลุม Core Question C3–C5)
+_ALLERGY_ANSWERED_KEYWORDS = [
+    # คำตอบว่าไม่แพ้
+    "ไม่แพ้", "ไม่มีประวัติแพ้", "ไม่มีการแพ้",
+    # คำตอบว่าแพ้ (พร้อมชื่อยา)
+    "แพ้ยา", "แพ้ penicillin", "แพ้ amoxicillin", "แพ้ ampicillin",
+    "แพ้ cephalosporin", "แพ้ augmentin", "แพ้ sulfa",
+    # อาการแพ้
+    "allergy", "anaphylaxis", "ผื่นขึ้น", "ลมพิษ", "บวม",
+    "หายใจลำบาก", "ช็อก", "แพ้รุนแรง",
+    # บริบทที่บอกว่าถามแล้ว
+    "ประวัติแพ้ยา", "ไม่เคยแพ้", "เคยแพ้",
+]
+
+
+def _allergy_answered_in_history(history: list[dict]) -> bool:
+    """ตรวจสอบว่าประวัติการสนทนามีคำตอบเรื่องแพ้ยาแล้วหรือยัง"""
+    for turn in history:
+        content = str(turn.get("content", "")).lower()
+        if any(kw.lower() in content for kw in _ALLERGY_ANSWERED_KEYWORDS):
+            return True
+    return False
+
 
 def clarify_node(state: AgentState) -> dict:
     cfg = get_settings()
@@ -23,9 +51,14 @@ def clarify_node(state: AgentState) -> dict:
         temperature=cfg.llm_temp_clarify,
     )
 
-    current_round = state.get("clarify_round", 0)
-    history       = state.get("history", [])
-    user_msg      = state["user_message"]
+    # ── Topic shift: reset round ──────────────────────────────
+    topic_shift = state.get("topic_shift", False)
+    current_round = 0 if topic_shift else state.get("clarify_round", 0)
+    if topic_shift:
+        logger.info("[clarify] topic_shift detected → reset clarify_round=0")
+
+    history  = state.get("history", [])
+    user_msg = state["user_message"]
 
     score        = cfg.completeness_threshold
     missing:      list[str] = []
@@ -55,19 +88,43 @@ def clarify_node(state: AgentState) -> dict:
         logger.warning(f"[clarify] completeness parse error: {exc}")
 
     # Domain-specific max rounds
-    domain_max = {"AOM": 3, "pharyngitis": 3, "sinusitis": 2, "allergy": 2, "general": 2}
+    domain_max = {"AOM": 3, "pharyngitis": 3, "sinusitis": 3, "allergy": 2, "general": 2}
     effective_max = domain_max.get(domain, cfg.max_clarify_rounds)
+
+    # ── ALLERGY GATE (เฉพาะกรณีที่ต้องบล็อกจริง) ─────────────
+    # บล็อกเฉพาะเมื่อ: ผู้ป่วยบอก "แพ้ยาอยู่" แต่ไม่มีรายละเอียด
+    # ไม่บล็อกเมื่อ: ผู้ป่วยไม่ได้พูดถึงแพ้ยาเลย (completeness_prompt จะ score สูงเองแล้ว)
+    allergy_gate_triggered = False
+    if domain in _ATB_DOMAINS:
+        user_said_allergic = any(
+            kw in user_msg.lower()
+            for kw in ["แพ้ยาอยู่", "แพ้ยา", "เคยแพ้", "allergy", "แพ้"]
+        )
+        allergy_details_known = _allergy_answered_in_history(history) or any(
+            kw.lower() in user_msg.lower()
+            for kw in ["ผื่น", "ลมพิษ", "anaphylaxis", "บวม", "หายใจลำบาก", "ช็อก",
+                       "ไม่แพ้", "ไม่มีประวัติแพ้", "ไม่เคยแพ้"]
+        )
+        # บล็อกเฉพาะเมื่อผู้ป่วยพูดถึงแพ้ยาแต่ไม่มีรายละเอียด
+        if user_said_allergic and not allergy_details_known:
+            allergy_in_missing = any(
+                "แพ้" in m or "allergy" in m.lower()
+                for m in missing
+            )
+            if not allergy_in_missing:
+                missing = missing + ["รายละเอียดการแพ้ยา (ชื่อยา + อาการที่เกิดขึ้น)"]
+            if score >= cfg.completeness_threshold:
+                score = cfg.completeness_threshold - 0.05
+                allergy_gate_triggered = True
+                logger.info("[clarify] ALLERGY GATE triggered — patient mentioned allergy without details")
 
     logger.info(
         f"[clarify] round={current_round}/{effective_max} domain={domain} "
-        f"score={score:.2f} threshold={cfg.completeness_threshold} missing={missing}"
+        f"score={score:.2f} threshold={cfg.completeness_threshold} "
+        f"missing={missing} allergy_gate={allergy_gate_triggered}"
     )
 
     # ── Decision ──────────────────────────────────────────────
-    # Hard conditions to NOT ask:
-    # 1. score >= threshold
-    # 2. no missing fields
-    # 3. already hit max rounds
     should_ask = (
         score < cfg.completeness_threshold
         and len(missing) > 0

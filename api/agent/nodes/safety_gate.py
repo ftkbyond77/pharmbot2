@@ -1,14 +1,9 @@
 """
-agent/nodes/safety_gate.py
---------------------------
-Node 5: Safety gate
-
-If any red flag confirmed → set refer_to_doctor=True and terminate.
-Otherwise → proceed to recommendation.
-
-Input  : state.symptom_summary, state.differential_diagnosis,
-         state.red_flags_found  (pre-filled by clinical_reason)
-Output : state.refer_to_doctor, state.refer_reason, state.next_action
+agent/nodes/safety_gate.py  (v2)
+---------------------------------
+Changes v2:
+- ใช้ refer_explanation จาก prompt เพื่อสร้างข้อความที่อธิบายเหตุผลก่อนแนะนำ ER
+  แทนที่จะบอกแค่ "พบสัญญาณอันตราย กรุณาพบแพทย์"
 """
 
 import json
@@ -17,7 +12,7 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 
 from api.agent.state import AgentState
 from api.config import get_settings
-from api.prompts.pharmacist import SYSTEM_PROMPT, safety_gate_prompt
+from api.prompts.pharmacist import SYSTEM_PROMPT, safety_gate_prompt, strip_fences
 
 
 def safety_gate_node(state: AgentState) -> dict:
@@ -26,12 +21,14 @@ def safety_gate_node(state: AgentState) -> dict:
 
     if pre_detected:
         logger.warning(f"[safety_gate] pre-detected red flags: {pre_detected}")
-        return _refer(
-            red_flags=pre_detected,
-            reason="พบสัญญาณอันตราย กรุณาพบแพทย์หรือไปห้องฉุกเฉินทันที",
+        reason = _build_refer_message(
+            flags=pre_detected,
+            explanation=None,
+            symptom_summary=" | ".join(state.get("symptom_summary", [])),
         )
+        return _refer(red_flags=pre_detected, reason=reason)
 
-    # secondary check via LLM for edge cases clinical_reason missed
+    # secondary LLM check for edge cases
     cfg = get_settings()
     llm = ChatGoogleGenerativeAI(
         model=cfg.gemini_model,
@@ -50,19 +47,27 @@ def safety_gate_node(state: AgentState) -> dict:
         {"role": "user",   "content": prompt},
     ])
 
+    has_flag    = False
+    flags_found = []
+    explanation = None
+    reason      = None
+
     try:
-        raw = strip_fences(response.content)
+        raw  = strip_fences(response.content)
         data = json.loads(raw)
         has_flag    = bool(data.get("has_red_flag", False))
         flags_found = data.get("red_flags_found", [])
+        explanation = data.get("refer_explanation")
         reason      = data.get("refer_reason")
     except Exception as e:
         logger.warning(f"safety_gate_node parse error: {e} — defaulting to safe")
-        has_flag, flags_found, reason = False, [], None
 
     logger.info(f"[safety_gate] has_flag={has_flag} flags={flags_found}")
 
     if has_flag:
+        # ถ้า LLM ให้ refer_reason ที่ดีมาแล้ว ใช้เลย ไม่งั้นสร้างจาก explanation
+        if not reason or len(reason) < 20:
+            reason = _build_refer_message(flags_found, explanation, symptom_text)
         return _refer(red_flags=flags_found, reason=reason)
 
     return {
@@ -71,6 +76,47 @@ def safety_gate_node(state: AgentState) -> dict:
         "red_flags_found":   [],
         "next_action":       "recommend",
     }
+
+
+def _build_refer_message(flags: list[str], explanation: str | None, symptom_summary: str) -> str:
+    """สร้างข้อความ refer ที่อธิบายเหตุผลก่อนแนะนำ ER"""
+    flag_name = flags[0] if flags else "อาการที่พบ"
+
+    if explanation:
+        return f"{explanation}\n\nกรุณาไปห้องฉุกเฉินหรือพบแพทย์ทันทีครับ อย่าชะลอเวลา"
+
+    # fallback ตาม flag type
+    flag_lower = flag_name.lower()
+    if "epiglottitis" in flag_lower or "muffled" in flag_lower:
+        return (
+            "อาการเสียงเปลี่ยน ร่วมกับน้ำลายไหลและกลืนลำบากมาก อาจบ่งชี้ภาวะกล่องเสียงบวมเฉียบพลัน "
+            "(Epiglottitis) ซึ่งทางเดินหายใจอาจอุดตันได้รวดเร็วมาก\n\n"
+            "กรุณาไปห้องฉุกเฉินทันทีครับ ไม่ควรชะลอเวลา"
+        )
+    elif "stridor" in flag_lower or "drooling" in flag_lower:
+        return (
+            "อาการหายใจมีเสียงดังและน้ำลายไหลในเด็กเป็นสัญญาณเตือนว่าทางเดินหายใจอาจถูกกีดขวาง "
+            "ซึ่งอันตรายถึงชีวิตได้\n\n"
+            "กรุณาพาไปห้องฉุกเฉินทันทีครับ"
+        )
+    elif "peritonsillar" in flag_lower or "abscess" in flag_lower:
+        return (
+            "อาการเจ็บคอรุนแรงมากข้างเดียว ร่วมกับอ้าปากได้น้อย อาจบ่งชี้ฝีรอบทอนซิล "
+            "(Peritonsillar Abscess) ซึ่งต้องรับการรักษาโดยแพทย์ด่วน\n\n"
+            "กรุณาไปพบแพทย์ที่ห้องฉุกเฉินโดยเร็วครับ"
+        )
+    elif "meningitis" in flag_lower:
+        return (
+            "ไข้สูงร่วมกับคอแข็งและระดับความรู้สึกตัวเปลี่ยน อาจบ่งชี้เยื่อหุ้มสมองอักเสบ "
+            "ซึ่งเป็นภาวะฉุกเฉินที่ต้องรักษาเร่งด่วน\n\n"
+            "กรุณาไปห้องฉุกเฉินทันทีครับ"
+        )
+    else:
+        return (
+            f"พบสัญญาณที่น่าเป็นห่วง: {flag_name} "
+            "ซึ่งอาจเป็นภาวะที่ต้องได้รับการรักษาโดยแพทย์เร่งด่วน\n\n"
+            "กรุณาไปพบแพทย์หรือห้องฉุกเฉินโดยเร็วครับ"
+        )
 
 
 def _refer(red_flags: list[str], reason: str | None) -> dict:
