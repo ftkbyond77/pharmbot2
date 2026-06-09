@@ -1,6 +1,8 @@
 """
-agent/nodes/recommendation.py — v3
-Passes needs_pushback + clinical_scores to prompt
+agent/nodes/recommendation.py — v4
+Changes vs v3:
+- อ่าน allergy_detail_incomplete จาก state → ส่งเข้า recommendation_prompt
+- อ่าน needs_rx_change_warning จาก clinical_scores (เหมือนเดิม)
 """
 from __future__ import annotations
 import json
@@ -34,7 +36,11 @@ def recommendation_node(state: AgentState) -> dict:
 
     needs_pushback  = state.get("needs_pushback", False)
     pushback_reason = state.get("pushback_reason", "")
-    clinical_scores = state.get("clinical_scores", {})
+
+    # v4: รวม clinical_scores + allergy_detail_incomplete เข้า dict เดียว
+    clinical_scores = dict(state.get("clinical_scores", {}))
+    if state.get("allergy_detail_incomplete", False):
+        clinical_scores["allergy_detail_incomplete"] = True
 
     prompt = recommendation_prompt(
         symptom_summary=symptom_text,
@@ -66,41 +72,36 @@ def recommendation_node(state: AgentState) -> dict:
         recommendation  = str(data.get("recommendation", "")).strip()
         sources         = [str(s) for s in data.get("sources", []) if s]
         first_line      = data.get("first_line_drug")
-        alternatives    = [str(a) for a in data.get("alternatives", []) if a]
-        when_to_see     = str(data.get("when_to_see_doctor", "")).strip()
+        alternatives    = data.get("alternatives", [])
+        when_to_see     = str(data.get("when_to_see_doctor", ""))
         augmented_notes = data.get("augmented_notes")
         pushback_message = data.get("pushback_message")
-    except json.JSONDecodeError as exc:
-        logger.warning(f"[recommendation] JSON parse failed: {exc}")
-        recommendation = response.content.strip()
-
-    if not recommendation:
-        recommendation = response.content.strip()
-
-    logger.info(f"[recommendation] first_line={first_line} sources={len(sources)} pushback={needs_pushback}")
+    except Exception as exc:
+        logger.warning(f"[recommendation] JSON parse error: {exc}")
+        recommendation = response.content if isinstance(response.content, str) else str(response.content)
 
     return {
-        "recommendation":  recommendation,
-        "sources":         sources,
-        "first_line_drug": first_line,
-        "alternatives":    alternatives,
+        "recommendation":    recommendation,
+        "sources":           sources,
+        "first_line_drug":   first_line,
+        "alternatives":      alternatives,
         "when_to_see_doctor": when_to_see,
-        "augmented_notes": augmented_notes,
-        "pushback_message": pushback_message,
-        "next_action":     "format",
+        "augmented_notes":   augmented_notes,
+        "pushback_message":  pushback_message,
+        "next_action":       "respond",
     }
 
 
-def _format_ddx(ddx_list) -> str:
+def _format_ddx(ddx_list: list) -> str:
     if not ddx_list:
-        return "(ไม่มีข้อมูล)"
-    lines = []
-    for item in ddx_list:
-        if isinstance(item, dict):
-            name = item.get("name", "?")
-            conf = item.get("confidence", "?")
-            reason = item.get("reasoning", "")
-            lines.append(f"- {name} ({conf}): {reason}")
+        return "ยังไม่ระบุ"
+    parts = []
+    for d in ddx_list:
+        if isinstance(d, dict):
+            name       = d.get("name", "")
+            confidence = d.get("confidence", "")
+            reasoning  = d.get("reasoning", "")
+            parts.append(f"{name} ({confidence}): {reasoning}")
         else:
-            lines.append(f"- {item}")
-    return "\n".join(lines)
+            parts.append(str(d))
+    return " | ".join(parts)

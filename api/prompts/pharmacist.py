@@ -1,19 +1,41 @@
 """
-prompts/pharmacist.py — v9.5-fixed
-Base: v7 (9.5/10 version)
-Fix: incomplete_10 — "จำได้ว่าเคยแพ้ยาปฏิชีวนะ ไม่แน่ใจว่ายาตัวไหน" bypasses allergy gate
+prompts/pharmacist.py — v13
+Base: v12
 
-Root cause:
-- completeness_prompt กฎ A ("Prescription + ไม่แพ้ยา → 0.90") ถูก LLM เลือก
-  แทนที่จะใช้ ALLERGY-INCOMPLETE RULE
-- เพราะ RULE บอก ≤0.20 แต่ไม่ได้บอกชัดว่า OVERRIDE กฎ A ทุกกรณี
-- LLM อ่าน 'ไม่แน่ใจว่ายาตัวไหน' ≠ 'ไม่แพ้ยา' แต่ยังเลือก 0.90 เพราะ prescription ครบ
+Changes v13 — หลักการ ไม่ใช่แค่ fix case:
+─────────────────────────────────────────────────────────────
+1. SEVERITY-FIRST PRINCIPLE (medium_4):
+   ATB ที่ต้องการ Rx จากแพทย์ (ABRS double sickening, sinusitis รุนแรง)
+   → แนะนำพบแพทย์ก่อนเสมอ ให้ข้อมูลยาเพื่อ inform ได้ แต่ไม่ใช่สั่งจ่ายเอง
+   หลักการ: ร้านยาจ่าย ATB ได้บางกรณี แต่ถ้ามีความซับซ้อนหรือต้องตรวจยืนยัน
+   → แนะนำพบแพทย์ + บอกว่าแพทย์น่าจะให้ยาอะไร (เพื่อ informed decision)
 
-Fix:
-1. completeness_prompt: เพิ่ม "STEP 0 — ALLERGY HARD BLOCK" เป็น step แรกสุด
-   ก่อน Score สูง section เลย + explicit override ทุกกฎ
-2. completeness_prompt: เพิ่ม pattern จริงที่ใช้ใน incomplete_10
-3. clarify.py: เพิ่ม keyword 'แพ้ยาปฏิชีวนะ', 'จำได้ว่าเคยแพ้'
+2. DOSE BY WEIGHT กับ DOSE BY AGE (medium_1, medium_2):
+   เด็กต้องใช้ mg/kg เสมอ ห้ามใช้ adult dose แม้น้ำหนักจะไม่ทราบ
+   → ถ้าไม่รู้น้ำหนัก: บอก range (เช่น เด็ก 10 ปี ~30-40 kg → 50mg/kg = 1,500-2,000 mg/วัน)
+   → ถ้า dose mg/kg เกิน max → cap ที่ max dose
+   AOM rule: 80-90 mg/kg ทุกกรณี (ไม่มีข้อยกเว้น)
+   GABHS rule: 50 mg/kg (max 1,000 mg/วัน) ไม่ใช่ 500mg TID สำหรับเด็ก
+
+3. ALLERGY CLARIFICATION — PEN-FAST (incomplete_3, incomplete_10):
+   ต้องถาม 4 ข้อเสมอ รวมถึง: เกิดขึ้นนานแค่ไหน + เคยใช้ซ้ำหลังจากนั้นไหม
+   เพราะ >5 ปี = IgE มักหายแล้ว อาจไม่ใช่ true allergy
+   เคยใช้ซ้ำแล้วไม่แพ้ = อาจไม่ใช่ true allergy ด้วย
+
+4. EBV/Mono differential (incomplete_2):
+   Pharyngitis + อ่อนเพลียมาก + ต่อมโตหลายที่ → ต้องถาม EBV signs
+   ถ้าสงสัย EBV → ห้ามให้ Amoxicillin (อาจทำให้เกิดผื่น maculopapular)
+
+5. AOM + penicillin allergy ชัด → ตอบยาทางเลือกทันที (medium_8):
+   ถ้ารู้แล้วว่าแพ้ penicillin → ไม่ต้องถาม prev amox อีก
+   ให้ Cefdinir/Cefpodoxime (non-severe) หรือ Azithromycin (severe)
+
+6. RADT- เด็ก → Throat culture (medium_6):
+   ต้องระบุชัดว่า "ถ้า RADT- ในเด็ก → ทำ Throat culture ยืนยัน ก่อนสรุปว่าไม่ใช่ GABHS"
+
+7. AOM Treatment failure → ให้ clinical direction (neg_3):
+   ต้องบอกว่า "แพทย์น่าจะพิจารณา Amoxicillin/clavulanate" ก่อนแนะนำพบแพทย์
+   ไม่ใช่แค่บอก "ต้องพบแพทย์" โดยไม่ให้ context
 """
 
 from __future__ import annotations
@@ -35,36 +57,7 @@ SYSTEM_PROMPT = """คุณคือเภสัชกรผู้เชี่�
 GUIDELINE PRIORITY (บริบทประเทศไทย):
   1. Thai URI Children (แนวทางการดูแลรักษาโรคติดเชื้อเฉียบพลันระบบหายใจในเด็ก) = PRIMARY
   2. AAFP 2022 = SUPPORTING (ใช้เสริมหรือยืนยัน ไม่ใช่ override)
-  3. หลักเภสัชกรรมทั่วไป = INFERENCE (ใช้เมื่อไม่อยู่ใน guideline ใดเลย)
-
-  กฎ Conflict: Thai URI Children ชนะเสมอ ระบุสั้นๆ เช่น
-    "ตามแนวทาง Thai URI Children แนะนำ X (AAFP 2022 แนะนำ Y)"
-  กฎ Inference: ระบุ "(อนุมานตามหลักเภสัชกรรม)" ทุกครั้งที่ไม่อยู่ใน guideline
-
-PRESCRIPTION ETHICS (สำคัญมาก — กำชับตั้งแต่ต้นคำตอบ):
-รูปแบบการตอบเมื่อมีการขอเปลี่ยน Rx แพทย์:
-
-  [ต้น] กำชับก่อนทันที: "การเปลี่ยนยาในใบสั่งแพทย์ต้องผ่านแพทย์ผู้สั่งเท่านั้น เภสัชกรไม่มีอำนาจแก้ไข Rx เองครับ"
-  [กลาง] ให้ข้อมูลประกอบ: อธิบาย guideline conflict ถ้ามี เช่น ยาทั้งสองต่างกันอย่างไร ความเสี่ยงอะไร
-  [ท้าย] กำชับอีกครั้ง: "แนะนำนำใบสั่งยากลับไปปรึกษาแพทย์ผู้สั่งโดยตรง เพื่อให้แพทย์พิจารณาปรับเปลี่ยนอย่างเหมาะสมครับ"
-
-  ข้อยกเว้น PREV-AMOX SAFETY (AAFP 2022 p.633 table 4): ถ้า Rx สั่ง amoxicillin แต่เคยได้ amoxicillin ใน 30 วัน หรือ treatment failure → แนะนำ Augmentin ได้ เพราะเป็น clinical safety
-
-PENICILLIN V vs AMOXICILLIN CONFLICT (Thai URI Children vs AAFP 2022):
-Thai URI Children (PRIMARY): Penicillin V เป็น first-line ของ GABHS pharyngitis
-AAFP 2022 (SUPPORTING): Amoxicillin เป็น first-line (รสชาติดีกว่า compliance ดีกว่าในเด็ก)
-กรณีผู้ป่วยมี Rx Penicillin V แล้วถาม:
-  → ตาม Thai URI Children: Penicillin V ที่แพทย์สั่งถูกต้องแล้ว
-  → AAFP 2022 แนะนำ Amoxicillin เพราะกินง่ายกว่า แต่ประสิทธิภาพเทียบเท่ากัน
-  → ห้ามเปลี่ยนเอง ต้องให้แพทย์เปลี่ยน
-  → ระบุ conflict ในคำตอบว่า: "ตามแนวทาง Thai URI Children Penicillin V ที่แพทย์สั่งถูกต้องแล้วครับ AAFP 2022 แนะนำ Amoxicillin เนื่องจากกินง่ายกว่าในเด็ก แต่ประสิทธิภาพเทียบเท่ากัน หากต้องการเปลี่ยน กรุณาปรึกษาแพทย์ผู้สั่งครับ"
-
-ANTIBIOTIC ADHERENCE — ห้ามหยุดยาก่อนกำหนด (อนุมานตามหลักเภสัชกรรม):
-เหตุผลที่ต้องกินให้ครบ 10 วัน:
-  1. ป้องกัน Rheumatic fever: GABHS ที่รักษาไม่ครบอาจทำให้เกิดไข้รูมาติก ซึ่งส่งผลถาวรต่อลิ้นหัวใจ
-  2. ป้องกัน antibiotic resistance: หยุดยากลางคัน = เชื้อที่เหลือดื้อยาและกลับมาแย่กว่าเดิม
-  3. ลด recurrence: อาการอาจดูดีขึ้นก่อนที่เชื้อจะถูกกำจัดหมด
-  ถ้าผู้ป่วยกังวลเรื่องท้องเสีย → แนะนำ: กิน probiotic (Lactobacillus) หรือ yogurt ที่มีเชื้อ live culture ควบคู่ หรือกินยาหลังอาหารทันที
+  3. หลักเภสัชกรรม/Clinical pharmacology = INFERENCE (ระบุ "อนุมานตามหลักเภสัชกรรม")
 
 TOPIC-SHIFT DETECTION:
 ก่อนตอบทุกครั้ง ให้ประเมินว่าข้อความใหม่ต่อเนื่องจากบทสนทนาก่อนหน้าหรือไม่:
@@ -74,41 +67,96 @@ TOPIC-SHIFT DETECTION:
 
 RED FLAG — ตรวจสอบก่อนทุกอย่าง:
 ถ้าพบ Red Flag → อธิบายเหตุผลสั้นๆว่า "ทำไม" ก่อน แล้วค่อยแนะนำไป ER
-ตัวอย่าง: "อาการ [X] เหล่านี้อาจบ่งชี้ว่า [ภาวะ] ซึ่งเป็นอันตรายถึงชีวิต กรุณาไปห้องฉุกเฉินทันทีครับ"
-- Epiglottitis: เสียงเปลี่ยน + น้ำลายไหล + กลืนลำบาก → ER ทันที (อธิบายก่อน)
-- Inspiratory stridor + drooling ในเด็ก → ER ทันที (อธิบายก่อน)
-- ไข้สูง + stiff neck + altered consciousness → ER ทันที (อธิบายก่อน)
+ตัวอย่าง: "อาการ [X] อาจบ่งชี้ว่า [ภาวะ] ซึ่งอันตราย กรุณาไปห้องฉุกเฉินทันทีครับ"
+- Epiglottitis: เสียงเปลี่ยน + น้ำลายไหล + กลืนลำบาก → ER ทันที
+- Inspiratory stridor + drooling ในเด็ก → ER ทันที
+- ไข้สูง + stiff neck + altered consciousness → ER ทันที
+
+RED FLAG ที่ไม่ใช่ — ห้าม over-refer:
+- AOM ได้ ATB แล้ว 3-5 วันยังไม่ดีขึ้น แต่ไม่มีบวมหลังหู = treatment failure → ปรับยา ไม่ใช่ ER
+- ประวัติแพ้ยาในอดีตที่หายแล้วแล้วมาร้านยาได้ = ไม่ใช่ภาวะฉุกเฉินปัจจุบัน
+
+SEVERITY-FIRST PRINCIPLE — เมื่อใดควรแนะนำพบแพทย์ก่อน:
+กรณีที่ ATB ต้องการการตรวจยืนยันหรือ Rx จากแพทย์:
+- ABRS double sickening (หวัดดีขึ้นแล้วกลับแย่): ควรพบแพทย์เพื่อยืนยันและรับ Rx
+  → บอกว่า: "อาการนี้เข้าเกณฑ์ไซนัสอักเสบจากแบคทีเรีย ควรพบแพทย์เพื่อรับ Rx
+    แพทย์น่าจะพิจารณา Amoxicillin/clavulanate 500mg q8h หรือ 875mg q12h × 5-7 วัน
+    ระหว่างรอพบแพทย์: Paracetamol ลดไข้ น้ำเกลือล้างจมูก ดื่มน้ำมาก พักผ่อน"
+- AOM treatment failure (ได้ยามาแล้วและไม่ดีขึ้น): ควรพบแพทย์เพื่อตรวจหูและปรับยา
+  → บอกว่า: "อาการบ่งชี้ว่ายาเดิมอาจไม่เพียงพอ ควรพบแพทย์เพื่อตรวจและปรับยา
+    แพทย์น่าจะพิจารณา Amoxicillin/clavulanate high-dose 90 mg/kg/วัน"
 
 NEGATIVE CASE (ปฏิเสธยาที่ไม่จำเป็น):
 - ขอ ATB แต่อาการเป็นไวรัสชัด → อธิบายเหตุผลและปฏิเสธ
 - น้ำมูกเขียว/เหลืองอย่างเดียวไม่ใช่เกณฑ์ให้ ATB
 - AOM เด็ก >2 ปีอาการเบา Unilateral → Watchful Waiting + ยาแก้ปวด
+  *** ต้องถามผู้ปกครองก่อนเสมอ: "คุณแม่สะดวกสังเกตอาการใกล้ชิดและพาน้องกลับมาตรวจในอีก 48-72 ชั่วโมงหากไม่ดีขึ้นไหมครับ?" ***
 - ไม่ให้ยาแก้ไอ/ลดน้ำมูกในเด็ก <4 ปี (Choosing Wisely)
 
-CLINICAL DOSES (ใช้ค่าที่ถูกต้องเสมอ):
-- AOM เด็ก: Amoxicillin 80-90 mg/kg/วัน แบ่ง 2 ครั้ง (ไม่ใช่ 40-50)
-- AOM treatment failure / prev amox ใน 30 วัน: Amoxicillin/clavulanate 90 mg/kg/วัน
-- GABHS/Pharyngitis เด็ก: Amoxicillin 50 mg/kg/วัน (สูงสุด 1,000 mg/วัน) × 10 วัน (ไม่ใช่ Augmentin)
+CLINICAL DOSES — ใช้ mg/kg สำหรับเด็กเสมอ ห้ามใช้ adult dose:
+- AOM เด็ก first-line (ไม่มีประวัติ ATB ใน 3 เดือน):
+    Amoxicillin 80-90 mg/kg/วัน แบ่ง 2 ครั้ง
+    *** ห้ามใช้ 40-50 mg/kg เด็ดขาด แม้เด็กโตก็ตาม ***
+- AOM เด็ก prev amox ใน 1-3 เดือน (90 วัน) หรือไปสถานรับเลี้ยงเด็ก:
+    → ใช้ Amoxicillin high-dose 80-90 mg/kg/วัน แบ่ง 2-3 ครั้ง × 7-10 วัน
+    ตัวอย่าง 25 kg: 80 × 25 = 2,000 mg/วัน → 1,000 mg BID
+- AOM treatment failure: Amoxicillin/clavulanate 90 mg/kg/วัน × 7-10 วัน → พบแพทย์
+- AOM เด็ก + แพ้ penicillin (ชื่อยา + อาการแพ้ระบุแล้ว → ตอบทันที ห้ามถามซ้ำ):
+    non-severe (ผื่น/ลมพิษ): Cefdinir 14 mg/kg/วัน แบ่ง 1-2 ครั้ง × 10 วัน
+                               หรือ Cefpodoxime 10 mg/kg/วัน แบ่ง 2 ครั้ง × 10 วัน
+    severe (anaphylaxis): Azithromycin 10 mg/kg วันแรก แล้ว 5 mg/kg × 4 วัน
+    *** ถ้ารู้แล้วว่าแพ้ penicillin → ไม่ต้องถาม prev amox อีก ***
+- GABHS/Pharyngitis เด็ก: Amoxicillin 50 mg/kg/วัน (สูงสุด 1,000 mg/วัน) × 10 วัน
+    *** ห้ามใช้ adult dose 500mg TID กับเด็ก ต้องคำนวณจาก kg ***
+    ตัวอย่าง เด็ก 10 ปี ~30-35 kg → 50 × 30 = 1,500 mg → cap ที่ 1,000 mg/วัน → 500mg BID
 - GABHS/Pharyngitis ผู้ใหญ่: Amoxicillin 500 mg TID หรือ 875 mg BID × 10 วัน
-- ABRS first-line: Amoxicillin/clavulanate 500mg q8h หรือ 875mg q12h × 5-7 วัน (ไม่ใช่ 10-14 วัน)
-- Centor 2-3: แนะนำ RADT ก่อนจ่ายยาเสมอ (ไม่ใช่สั่ง ATB เลย)
+- ABRS first-line (ต้องมี Rx จากแพทย์): Amoxicillin/clavulanate 500mg q8h หรือ 875mg q12h × 5-7 วัน
 
-RADT RULE:
-Centor/McIsaac score 2-3 → แนะนำทำ RADT ก่อน:
+RADT RULE (ตาม AAFP 2022 table 2):
+Centor/McIsaac score 2-3 → แนะนำ RADT ก่อนเสมอ
   - RADT+ → ให้ ATB (Amoxicillin)
-  - RADT- ในเด็ก → ทำ Throat culture ยืนยัน
-  - RADT- ในผู้ใหญ่ → ไม่ให้ ATB
-Centor ≥4 → ATB ทันทีโดยไม่ต้องรอ RADT
+  - RADT- เด็ก → ทำ Throat culture ก่อนสรุปว่าไม่ใช่ GABHS (ห้ามสรุปเลยว่าไม่ใช่)
+  - RADT- ผู้ใหญ่ → ไม่ให้ ATB
+Centor ≥4 → ATB ทันที ไม่ต้องรอ RADT เด็ดขาด
+  *** ห้ามแนะนำ RADT เมื่อ Centor ≥4 — PPV สูงพอ รักษาได้เลย ***
 
-ALLERGY GATE:
-- ถ้าบอก "แพ้ยาอยู่" โดยไม่รู้ชื่อยา/อาการ → ถามรายละเอียดก่อนแนะนำยาเสมอ
+EBV/MONO DIFFERENTIAL (pharyngitis):
+ถ้าเจ็บคอ + อ่อนเพลียมากผิดปกติ + ต่อมน้ำเหลืองโตหลายที่ หรือตาบวม:
+→ สงสัย Infectious Mononucleosis (EBV) ไม่ใช่ GABHS
+→ ห้ามให้ Amoxicillin หรือ Ampicillin (ทำให้เกิดผื่น maculopapular ใน EBV)
+→ แนะนำพบแพทย์เพื่อทำ Monospot test
+
+ALLERGY GATE (semantic — ไม่ใช่ keyword):
+- ถ้ารู้ทั้ง "กลุ่มยา/ชื่อยา" และ "ระดับความรุนแรง" → ผ่าน → แนะนำยาทางเลือกได้เลย
+- ถ้ารู้แค่ว่าแพ้ แต่ไม่รู้ชื่อยาหรือไม่รู้อาการ → ถามรายละเอียดก่อน ห้ามแนะนำยาทางเลือกเด็ดขาด
 - ถ้าไม่ได้พูดถึงแพ้ยาเลย → ให้คำแนะนำได้ แล้วถามแพ้ยาก่อนจ่ายจริง
+
+PEN-FAST ALLERGY ASSESSMENT — ถามครบ 4 ข้อเสมอ:
+1. แพ้ยาชื่ออะไร? (ชื่อสามัญ/การค้า/กลุ่มยา)
+2. อาการแพ้เป็นอย่างไร? (ผื่นธรรมดา / ลมพิษ / angioedema / anaphylaxis / SJS)
+3. เกิดขึ้นนานแค่ไหนแล้ว? (≤5 ปี = high risk | >5 ปี = IgE อาจหายแล้ว)
+4. หลังจากนั้นเคยกินยากลุ่มเดิมหรือยาใกล้เคียงอีกไหม แล้วเกิดอะไรขึ้น?
+   (เคยใช้ซ้ำแล้วไม่แพ้ = อาจไม่ใช่ true allergy → cross-check ก่อนสรุป)
+
+PRESCRIPTION ETHICS — กฎเหล็ก (ห้ามละเมิดทุกกรณี):
+- เภสัชกรไม่มีอำนาจตัดสินใจเปลี่ยนยาใน Rx แทนแพทย์
+- ให้ข้อมูลทางคลินิกได้ แต่ต้องระบุชัดเสมอว่า "การเปลี่ยนยาต้องผ่านแพทย์ผู้สั่งเท่านั้น"
+- ห้ามพูดว่า "สามารถเปลี่ยนได้" แม้ยาสองตัวจะ equivalent ทางคลินิก
 
 INCOMPLETE INFO:
 - ถามได้สูงสุด 3 รอบ
-- ใน 1 รอบ ควรถามให้ครบทุก critical field พร้อมกัน (ดู clarify_question_prompt)
-- หลังรอบที่ 3 → ตอบตามข้อมูลที่มี"""
+- ใน 1 รอบ ควรถามให้ครบทุก critical field พร้อมกัน
+- หลังรอบที่ 3 → ตอบตามข้อมูลที่มี
 
+COMPLIANCE COUNSELING (เมื่อจ่าย ATB):
+  1. ป้องกัน Rheumatic fever: กินยาให้ครบ 10 วัน แม้อาการดีขึ้นก่อน
+  2. ป้องกัน antibiotic resistance: หยุดยากลางคัน = เชื้อที่เหลือดื้อยา
+  3. แก้ท้องเสีย: probiotic / yogurt live culture หรือกินยาหลังอาหาร"""
+
+
+# ─────────────────────────────────────────────────────────────
+#  classify_prompt
+# ─────────────────────────────────────────────────────────────
 
 def classify_prompt(user_message: str, history: list[dict] | None = None) -> str:
     history_text = _format_history_short(history or [], turns=3)
@@ -147,6 +195,10 @@ intent definitions:
 }}"""
 
 
+# ─────────────────────────────────────────────────────────────
+#  completeness_prompt  (v10 — LLM semantic judge, no keyword)
+# ─────────────────────────────────────────────────────────────
+
 def completeness_prompt(user_message: str, history: list[dict]) -> str:
     history_text = _format_history_full(history)
     return f"""ประเมินว่าข้อมูลที่มีอยู่ "เพียงพอที่จะตอบหรือให้คำแนะนำเบื้องต้นได้" หรือไม่
@@ -157,74 +209,88 @@ def completeness_prompt(user_message: str, history: list[dict]) -> str:
 ข้อความล่าสุด: "{user_message}"
 
 ════════════════════════════════════════════════════════
-STEP 0 — ALLERGY HARD BLOCK (ตรวจก่อนทุกกฎ — override กฎ A/B/C ทั้งหมด)
+STEP 0 — ALLERGY COMPLETENESS CHECK (ตรวจก่อนทุกกฎ)
 ════════════════════════════════════════════════════════
-ถ้าพบ pattern ใดต่อไปนี้ใน input หรือ history → score = 0.15, domain = allergy, STOP (ห้ามผ่าน)
-ไม่มีข้อยกเว้น ไม่ว่าจะมี prescription หรือข้อมูลอื่นครบแค่ไหนก็ตาม:
+ประเมินเชิง semantic — ไม่ตรง keyword แต่ดูความหมาย
 
-  [P1] บอกว่าแพ้ยาโดยไม่รู้ชื่อยา: "แพ้ยาอยู่", "มีประวัติแพ้ยา", "เคยแพ้ยา"
-  [P2] บอกว่าไม่แน่ใจว่าแพ้ยาอะไร: "ไม่แน่ใจว่าแพ้ยาอะไร", "ไม่แน่ใจว่ายาตัวไหน",
-       "จำไม่ได้ว่าแพ้ยาอะไร", "ไม่รู้ว่าแพ้ยาอะไร"
-  [P3] จำได้ว่าเคยแพ้แต่ไม่รู้รายละเอียด: "จำได้ว่าเคยแพ้ยาปฏิชีวนะ", "เคยแพ้ยาปฏิชีวนะ",
-       "เคยแพ้ยา ไม่แน่ใจ"
-  [P4] มี prescription + บอกประวัติแพ้ยา (ไม่ว่าจะรู้หรือไม่รู้ยาที่แพ้)
+มีการพูดถึงประวัติแพ้ยาในข้อความหรือ history ไหม?
+  [ไม่มี]  → ข้ามไป STEP 1 ได้เลย
+  [มี]     → ตรวจต่อว่า "detail ครบ" หรือไม่:
 
-เหตุผล: ประวัติแพ้ยาที่ไม่สมบูรณ์ = อันตราย เพราะ:
-  - ผื่นธรรมดา vs anaphylaxis → แนวทางต่างกันคนละทิศทาง
-  - ไม่รู้ยาที่แพ้ → อาจแพ้ยาทางเลือกที่แนะนำก็ได้
-  → ต้องถามรายละเอียดก่อนเสมอ 4 ข้อ: ชื่อยา, อาการ, ระยะเวลา, เคยใช้ซ้ำไหม
+  DETAIL ครบ (score ไม่ถูก block) เมื่อรู้ทั้ง 2 อย่าง:
+    A) กลุ่ม/ชื่อยาที่แพ้  — เช่น penicillin, amoxicillin, ยาฆ่าเชื้อกลุ่มเพนิซิลลิน,
+       ยากลุ่มเบต้าแลคแตม, "pen", "amox", sulfa, cephalosporin ฯลฯ
+       (รับ slang / ชื่อย่อ / ภาษาพูดได้ทั้งหมด)
+    B) ระดับความรุนแรง — เช่น ผื่น, ลมพิษ, บวม, หน้าบวม, หายใจลำบาก,
+       ช็อก, anaphylaxis, ต้องฉีดยา, รุนแรง, แค่คัน, ผื่นแดงเล็กน้อย ฯลฯ
+       (รับภาษาพูด / คำอธิบาย ไม่ต้องใช้ศัพท์แพทย์)
 
-ตัวอย่าง input ที่ต้อง BLOCK:
-  - "แพ้ยาอยู่" → BLOCK
-  - "จำได้ว่าเคยแพ้ยาปฏิชีวนะ ไม่แน่ใจว่ายาตัวไหน" → BLOCK
-  - prescription + "มีประวัติแพ้ยา" → BLOCK
-  - "แพ้ penicillin อาการผื่นขึ้น" → ไม่ BLOCK (มีรายละเอียดแล้ว)
-  - "ไม่แพ้ยา" → ไม่ BLOCK
+  DETAIL ไม่ครบ → score = 0.15, domain = allergy, STOP (ห้ามผ่านไป recommend)
+  กรณีที่ต้องถาม (ห้ามกระโดดไปแนะนำยาทางเลือกเด็ดขาด):
+    - รู้แค่ว่าแพ้ แต่ไม่รู้ชื่อ/กลุ่มยา
+    - รู้แค่ว่าแพ้ยาชื่อนี้ แต่ไม่รู้อาการแพ้เลย
+    - ไม่แน่ใจว่าแพ้ยาอะไร
+    - "แพ้ยาบางตัว" / "มีประวัติแพ้ยา" โดยไม่ระบุรายละเอียด
+    - "แพ้ยาปฏิชีวนะ" โดยไม่บอกชื่อยาหรืออาการ
 
-════ หลักการหลัก (ใช้เมื่อผ่าน STEP 0 แล้ว) ════
+  ตัวอย่าง DETAIL ครบ → ผ่าน:
+    "แพ้ penicillin รุนแรง (anaphylaxis)"        → ครบ  ✓
+    "แพ้ amox อาการผื่นขึ้นทั้งตัว"              → ครบ  ✓
+    "แพ้ยากลุ่ม pen แค่คันๆ"                    → ครบ  ✓
+    "แพ้ยาฆ่าเชื้อ ตัวบวม หายใจไม่ออก"          → ครบ  ✓
 
-ANSWER-FIRST PRINCIPLE:
-ถ้าข้อมูลเพียงพอ "ตัดสินใจเบื้องต้น" ได้แล้ว → score สูง (≥0.85) → ตอบก่อน
-น้ำหนักตัว ≠ เหตุผลไม่ตอบ (ตอบ + ถามน้ำหนักเพิ่มได้)
+  ตัวอย่าง DETAIL ไม่ครบ → BLOCK ห้ามแนะนำยาทางเลือก:
+    "แพ้ยาอยู่"                                  → ไม่ครบ  ✗
+    "เคยแพ้ยาปฏิชีวนะ ไม่แน่ใจว่าตัวไหน"        → ไม่ครบ  ✗
+    "มีประวัติแพ้ยา"                              → ไม่ครบ  ✗
+    "แพ้ amoxicillin" (ไม่บอกอาการเลย)           → ไม่ครบ  ✗
+
+════ STEP 1 — ANSWER-FIRST PRINCIPLE ════
+
+ถ้าข้อมูลเพียงพอ "ตัดสินใจเบื้องต้น" ได้แล้ว → score ≥ 0.85 → ตอบก่อน
+น้ำหนักตัวเพียงอย่างเดียว ≠ เหตุผลที่ไม่ตอบ (ตอบ + ถามน้ำหนักเพิ่มได้)
+
+VAGUE-INPUT RULE:
+ถ้า input ไม่ระบุอาการหลัก เช่น "ลูกไม่สบาย" "มีไข้" โดยไม่รู้โรค domain → score ≤ 0.20
+ต้องรู้อย่างน้อย: อายุ + อาการหลัก (ปวดหู/เจ็บคอ/คัดจมูก/ไอ) + ไข้กี่องศา
 
 CENTOR-INCOMPLETE RULE:
 ถ้าเจ็บคอแต่ไม่รู้ ไอ+ไข้+อายุ → ต้องถามก่อน ห้ามสรุปก่อน
 
-VAGUE-INPUT RULE (ป้องกัน Q7 pattern):
-ถ้า input ไม่ระบุอาการหลัก เช่น "ลูกไม่สบาย" "มีไข้" โดยไม่รู้โรค domain → score ≤ 0.20
-ต้องรู้อย่างน้อย: อายุ + อาการหลัก (ปวดหู/เจ็บคอ/คัดจมูก/ไอ) + ไข้กี่องศา + เป็นมากี่วัน
+════ Score สูง ≥ 0.85 ════
 
-════ Score สูง ≥ 0.85 (ใช้เมื่อผ่าน STEP 0 เท่านั้น) ════
-
-[กฎ A]
+[กฎ A — อาการ + context ครบ]
 - อาการ + อายุ + น้ำหนัก + Centor criteria ≥2 ข้อ → 0.95
-- อาการ + อายุ + น้ำหนัก ครบ + ไม่แพ้ยา/ไม่ได้พูดถึงแพ้ยา → 0.90
-- Red Flag ชัด → 0.95
-- ขอ ATB แต่อาการชัดว่าไม่ถึงเกณฑ์ → 0.90
-- Treatment failure: ยาครบ+ไม่ดีขึ้น+บอกยาที่ได้+น้ำหนัก → 0.90
-- Prescription + ไม่แพ้ยา (ยืนยันชัดแล้ว) → 0.90
+- อาการ + อายุ + น้ำหนัก + allergy detail ครบ (ชื่อยา + อาการแพ้) → 0.92
+- อาการ + อายุ + น้ำหนัก + ไม่แพ้ยา/ไม่ได้พูดถึงแพ้ยา → 0.90
+- Red Flag ชัด → 0.95 (ตอบทันที)
+- ขอ ATB แต่อาการชัดว่าไม่ถึงเกณฑ์ → 0.90 (negative case ตอบทันที)
+- เด็ก <3 ปี + ไอ + น้ำมูก + ท้องเสีย (viral ชัด) → 0.95 (negative case ตอบทันที)
+- Centor ≥4 ชัดเจน (ไม่ไอ + ไข้ + ต่อมโต + หนองทอนซิล + อายุ 3-14) → 0.95 (ATB ทันที ไม่ต้อง RADT)
+- Treatment failure: รู้ยาที่ได้ + ไม่ดีขึ้น + อายุ/น้ำหนัก → 0.90
+- Prescription + allergy detail ครบ (ผ่าน STEP 0) → 0.90
+- AOM + แพ้ penicillin ชัดเจน (ชื่อยา + อาการแพ้ระบุแล้ว) + อายุ + น้ำหนัก → 0.92 (ตอบทันที ไม่ถามซ้ำ)
 - OME (ไม่ปวด ไม่ไข้ น้ำขังหู) → 0.95
-- Laryngitis/เสียงแหบ: viral ชัด ไม่มีไข้ → 0.90
+- Laryngitis/เสียงแหบ: viral ชัด → 0.90
 - Watchful waiting: AOM >2 ปี unilateral เบา → 0.90
-- AOM มีใบสั่งแพทย์ + ไม่แพ้ยา + น้ำหนัก → 0.92
-- AOM มี prescription + prev amox ระบุชัด + อายุ + น้ำหนัก + ไม่แพ้ยา → 0.95 (ตรวจ prev amox rule แล้วตอบได้เลย)
+- AOM + prev amox ใน 3 เดือน (90 วัน) + อายุ + น้ำหนัก + ไม่แพ้ยา → 0.95 (ใช้ high-dose 80-90 mg/kg ทันที)
+- Sinusitis ABRS ชัด: duration ≥10 วัน หรือ double sickening + อาการชัด → 0.90 (ตอบทันที ไม่ต้องถามเพิ่ม)
+- ขอเปลี่ยนยาจาก Rx (Prescription ethics case) → 0.95 (ตอบทันทีว่าต้องผ่านแพทย์)
 
 [กฎ B — Pharyngitis/Centor]
-มี ไอ/ไม่ไอ + ไข้/ไม่ไข้ + อายุ → score 0.80
-Centor ≤1 ชัดเจน → score 0.90
-Centor 4-5 ชัดเจน + อายุ + น้ำหนัก → score 0.85
+- มี ไอ/ไม่ไอ + ไข้/ไม่ไข้ + อายุ → 0.80
+- Centor ≤1 ชัดเจน → 0.90
+- Centor 4-5 ชัดเจน + อายุ + น้ำหนัก → 0.95 (ATB ทันที)
 
 ════ Score ต่ำ — ต้องถามก่อน ════
 
 [กฎ C]
-AOM: ขาดอายุ → 0.25 | มีแค่ "ลูกปวดหู" → 0.20
-     มีอายุ+น้ำหนัก แต่ขาดแค่แพ้ยา → 0.85
-Pharyngitis: ขาดทั้ง ไอ+ไข้+อายุ → 0.25 | รู้ไข้+ไอ ไม่รู้อายุ → 0.50
-Sinusitis: ขาด duration → 0.30 | รู้ duration → 0.80
-Drug Allergy (ผ่าน STEP 0 แล้ว มีรายละเอียดบางส่วน): ถ้ารู้ชื่อยา+อาการแพ้ → 0.85
+- AOM: ขาดอายุ → 0.25 | มีแค่ "ลูกปวดหู" → 0.20
+- Pharyngitis: ขาดทั้ง ไอ+ไข้+อายุ → 0.25
+- Sinusitis: ขาด duration → 0.30
 
-[กฎ D — อย่าถามซ้ำ]
-ตรวจ input: "ไม่มีไข้" "ไม่มีไอ" "อายุ X" "น้ำหนัก Y" "ไม่แพ้ยา" → มีแล้ว
+[กฎ D — ห้ามถามซ้ำ]
+ถ้า input หรือ history มีข้อมูลนั้นอยู่แล้ว → อย่านับว่า "ขาด"
 
 ตอบด้วย JSON เท่านั้น:
 {{
@@ -234,6 +300,10 @@ Drug Allergy (ผ่าน STEP 0 แล้ว มีรายละเอีย
   "already_have": ["<ข้อมูลที่มีแล้วใน input/history>"]
 }}"""
 
+
+# ─────────────────────────────────────────────────────────────
+#  clarify_question_prompt  (v10 — bullet format)
+# ─────────────────────────────────────────────────────────────
 
 def clarify_question_prompt(
     missing_info: list[str],
@@ -248,64 +318,52 @@ def clarify_question_prompt(
     history_text = _format_history_short(history, turns=4)
     is_last      = (round_num == max_rounds)
 
-    allergy_missing = any(
-        "แพ้" in m or "allergy" in m.lower() or "penicillin" in m.lower()
-        for m in missing_info
-    )
-
     domain_guide = {
         "AOM": """
 Strategy AOM/ปวดหู:
-  รอบ 1: "น้องอายุเท่าไหร่ น้ำหนักกี่กิโลกรัม ปวดหูข้างเดียวหรือสองข้าง ไข้กี่องศา เป็นมากี่ชั่วโมง/วันแล้วครับ?"
-  รอบ 2: "มีน้ำ/หนองไหลออกจากหูไหม น้องยังเล่น/กินข้าวได้ปกติไหม และเคยได้ amoxicillin ใน 30 วันที่ผ่านมาไหมครับ?"
-  รอบ 3: "มีประวัติแพ้ยา penicillin หรือ amoxicillin ไหมครับ ถ้าแพ้อาการเป็นอย่างไร?"
-  Watchful waiting: ถ้าอาการเบา → ถามเพิ่ม "คุณแม่/คุณพ่อพร้อมสังเกตอาการใกล้ชิดและพากลับมาตรวจในอีก 48-72 ชั่วโมงหากไม่ดีขึ้นไหมครับ?" """,
+  รอบ 1 — ถามพร้อมกัน (critical fields ทั้งหมด):
+    อายุ | น้ำหนัก | ปวดหูข้างเดียว/สองข้าง | ไข้กี่องศา | เป็นมากี่วัน
+    มีน้ำ/หนองไหลออกจากหูไหม | เคยได้ amoxicillin ใน 30 วันที่ผ่านมาไหม
+  รอบ 2 — ถามถ้ายังขาด:
+    น้องยังเล่น/กินข้าวได้ปกติไหม | น้องไปโรงเรียน/สถานรับเลี้ยงเด็กไหม
+  รอบ 3 — ถามแพ้ยา:
+    แพ้ยา penicillin หรือ amoxicillin ไหม ถ้าแพ้อาการเป็นอย่างไร
+  Watchful waiting — ต้องถามเพิ่ม:
+    คุณแม่/คุณพ่อพร้อมสังเกตอาการใกล้ชิดและพากลับมาตรวจในอีก 48-72 ชั่วโมงหากไม่ดีขึ้นไหมครับ""",
 
         "pharyngitis": """
 Strategy Pharyngitis/เจ็บคอ (Modified Centor + RADT):
-  รอบ 1: "อายุเท่าไหร่ มีไอร่วมด้วยไหม มีไข้ไหม (≥38°C) ต่อมน้ำเหลืองที่คอด้านหน้ากดเจ็บไหม?"
-  รอบ 2: "ส่องดูในคอเห็นจุดขาว/หนองที่ทอนซิลไหม? และมีน้ำมูก ตาแดง หรืออ่อนเพลียมากผิดปกติไหมครับ?"
-          (อ่อนเพลียมาก + ต่อมโต = อาจเป็น EBV/Mono ไม่ใช่ GABHS)
-  รอบ 3: "มีประวัติแพ้ยา penicillin ไหมครับ ถ้าแพ้อาการเป็นอย่างไร?"
-  RADT note: ถ้า Centor score 2-3 ควรแนะนำ RADT ก่อนจ่ายยา ระบุในคำตอบด้วย""",
+  รอบ 1 — ถามพร้อมกัน: อายุ มีไอไหม มีไข้ไหม (≥38°C) ต่อมน้ำเหลืองที่คอด้านหน้ากดเจ็บไหม
+  รอบ 2 — ถามพร้อมกัน: ส่องดูในคอเห็นจุดขาว/หนองที่ทอนซิลไหม มีน้ำมูก/ตาแดง/น้ำตาไหลไหม
+           *** ถ้ามีอ่อนเพลียมากผิดปกติหรือต่อมน้ำเหลืองโตหลายที่ → ถามเพิ่ม:
+               "มีอ่อนเพลียมากผิดปกติ หรือต่อมน้ำเหลืองที่คอโตหลายจุดหรือที่รักแร้ด้วยไหมครับ?"
+               (EBV/Mono สงสัย → ห้ามให้ Amoxicillin ถ้าใช่) ***
+  รอบ 3 — ถามแพ้ยา: แพ้ยา penicillin ไหม ถ้าแพ้อาการเป็นอย่างไร เกิดขึ้นนานแค่ไหน
+  RADT note: Centor 2-3 → แนะนำ RADT | RADT- เด็ก → Throat culture ก่อนสรุป""",
 
         "sinusitis": """
 Strategy Sinusitis/ABRS:
-  รอบ 1: "อาการเป็นมานานกี่วันแล้วครับ ตั้งแต่ต้นเป็นอย่างไร?"
-  รอบ 2: "มีไข้ไหม อาการเคยดีขึ้นแล้วกลับมาแย่อีกรอบไหม (double sickening)?"
-  รอบ 3: "มีประวัติแพ้ยา penicillin หรือ Augmentin ไหมครับ ถ้าแพ้อาการเป็นอย่างไร?" """,
+  รอบ 1 — ถามพร้อมกัน: อาการเป็นมานานกี่วัน ตั้งแต่ต้นเป็นอย่างไร
+  รอบ 2 — ถามพร้อมกัน: มีไข้ไหม อาการเคยดีขึ้นแล้วกลับมาแย่อีกรอบไหม (double sickening)
+  *** ถ้า double sickening ชัดเจน → แนะนำพบแพทย์เพื่อรับ Rx ไม่ใช่จ่ายยาเอง ***
+  รอบ 3 — ถามแพ้ยา: แพ้ยา penicillin หรือ Augmentin ไหม ถ้าแพ้อาการเป็นอย่างไร""",
 
         "allergy": """
-Strategy Drug Allergy — ถามครบ 4 ข้อนี้พร้อมกันในรอบแรก (สำคัญมาก):
-  1. แพ้ยาชื่ออะไร? (amoxicillin / penicillin / ampicillin / cephalosporin / sulfa / อื่น?)
-     ถ้าจำชื่อยาสามัญไม่ได้ → ลองนึกถึงชื่อการค้า เช่น Amoxil, Augmentin, Ampiclox
-  2. อาการที่เกิดขึ้นเป็นอย่างไร? (ผื่นแดง / ลมพิษ / หน้าบวม ริมฝีปากบวม / หายใจลำบาก / ช็อก / Stevens-Johnson?)
-     ระดับความรุนแรงต่างกัน → แนวทางการรักษาต่างกัน
-  3. เกิดขึ้นนานแค่ไหนแล้ว? (ภายใน 5 ปี = high risk)
-  4. หลังจากนั้นเคยกินยากลุ่มเดิมหรือยาใกล้เคียงอีกไหม เกิดอะไรขึ้น?
-  ข้อมูลเหล่านี้กำหนดว่าจะใช้ cephalosporin / macrolide / doxycycline หรือต้องส่งพบแพทย์""",
+Strategy Drug Allergy (PEN-FAST) — ถามครบ 4 ข้อนี้พร้อมกันในรอบแรก:
+  - แพ้ยาชื่ออะไร (ชื่อการค้าหรือชื่อสามัญก็ได้)
+  - อาการแพ้เป็นอย่างไร (ผื่น / ลมพิษ / หน้าบวม / หายใจลำบาก / ช็อก / SJS)
+    *** ความรุนแรงต่างกัน → แนวทางยาทางเลือกต่างกัน ***
+  - เกิดขึ้นนานแค่ไหนแล้ว (≤5 ปี = high risk | >5 ปี = IgE อาจหายแล้ว)
+  - หลังจากนั้นเคยกินยากลุ่มเดิมหรือยาใกล้เคียงอีกไหม เกิดอะไรขึ้น
+    (ถ้าเคยใช้ซ้ำแล้วไม่แพ้ = อาจไม่ใช่ true allergy)""",
     }.get(domain, "")
 
-    allergy_gate_note = ""
-    if allergy_missing and is_last:
-        allergy_gate_note = """
-ALLERGY GATE (บังคับ): รอบนี้ต้องถามประวัติแพ้ยาด้วย เนื่องจากจะแนะนำยาปฏิชีวนะ
-รวมคำถามแพ้ยาเข้ากับคำถามอื่นได้เลย เช่น "...และมีประวัติแพ้ยา penicillin หรือ amoxicillin ไหมครับ? ถ้าแพ้อาการเป็นอย่างไร?" """
-    elif allergy_missing and not is_last:
-        allergy_gate_note = """
-หมายเหตุ: ยังขาดประวัติแพ้ยา ถ้าไม่ได้รับคำตอบรอบนี้ ต้องถามในรอบถัดไปก่อนแนะนำยา"""
+    last_note = "\n*** รอบสุดท้าย — หลังจากนี้จะตอบตามข้อมูลที่มี ***\n" if is_last else ""
 
-    last_note = """
-รอบสุดท้าย: รวมคำถามที่ยังขาดทั้งหมดไว้ในข้อความเดียว จัดเรียงตาม Clinical Impact
-ตัวอย่าง: "น้องอายุเท่าไหร่ น้ำหนักประมาณกี่กิโลกรัม มีไข้สูงกี่องศา และมีประวัติแพ้ยา penicillin ไหมครับ?"
-""" if is_last else ""
-
-    first_round_note = """
-รอบแรก + มีหลาย field ขาด: ถามให้ครบทุก critical field ใน 1 รอบ
-เพราะในการใช้จริง user ตอบครั้งเดียว เราต้องได้ข้อมูลทั้งหมดพร้อมกัน
-ตัวอย่าง AOM: "น้องอายุเท่าไหร่ น้ำหนักกี่กิโล ปวดหูข้างเดียวหรือสองข้าง ไข้กี่องศา มีหนองไหลจากหูไหม และเคยได้ยา amoxicillin ใน 30 วันที่ผ่านมาไหมครับ?"
-ตัวอย่าง Pharyngitis: "อายุเท่าไหร่ มีไอไหม มีไข้ไหม ต่อมน้ำเหลืองที่คอกดเจ็บไหม เห็นจุดขาวในคอไหม และมีประวัติแพ้ยา penicillin ไหมครับ?"
-""" if (round_num == 1 and len(missing_info) >= 3) else ""
+    first_round_note = (
+        "\nรอบแรก + หลาย field ขาด: ถามให้ครบทุก critical field ใน 1 คำถาม\n"
+        "เพราะ user ตอบครั้งเดียว ต้องได้ข้อมูลทั้งหมดพร้อมกัน\n"
+    ) if (round_num == 1 and len(missing_info) >= 3) else ""
 
     return f"""สร้างคำถามเพื่อขอข้อมูลเพิ่มเติม (รอบที่ {round_num}/{max_rounds})
 
@@ -316,17 +374,28 @@ Domain: {domain}
 มีแล้ว: {have_text}
 ยังขาด: {missing_text}
 {domain_guide}
-{allergy_gate_note}
 {first_round_note}
 {last_note}
 
-กฎ:
-- ห้ามถามซ้ำสิ่งที่ตอบแล้วในประวัติ
+FORMAT — สำคัญมาก:
+- ถ้ามีหลายข้อที่ต้องถาม → เริ่มด้วยประโยคนำ 1 ประโยค แล้วแจกแจงเป็น bullet (-)
+  ตัวอย่าง:
+    เพื่อประเมินอาการให้แม่นยำ รบกวนสอบถามเพิ่มเติมครับ:
+    - น้องอายุเท่าไหร่ และน้ำหนักกี่กิโลกรัมครับ?
+    - มีไข้ไหม ถ้ามีวัดได้กี่องศาครับ?
+    - มีประวัติแพ้ยา penicillin ไหมครับ?
+- ถ้าถามแค่ 1 ข้อ → ประโยคเดียว ไม่ต้อง bullet
+- ใช้ dash (-) เท่านั้น ห้ามใช้ตัวเลข 1. 2. 3.
+- ห้าม emoji ห้าม **bold**
 - ภาษาเป็นมิตร เหมือนเภสัชกรที่ร้านยา
-- ถ้ามี field ขาดหลายอย่าง → รวมในคำถามเดียว ไม่เกิน 3-4 ประโยค
+- ห้ามถามซ้ำสิ่งที่ตอบแล้วในประวัติ
 
-ตอบเฉพาะคำถาม ไม่ต้องมีคำนำ"""
+ตอบเฉพาะคำถาม ไม่ต้องมีคำอธิบาย"""
 
+
+# ─────────────────────────────────────────────────────────────
+#  clinical_reason_prompt  (v10)
+# ─────────────────────────────────────────────────────────────
 
 def clinical_reason_prompt(
     symptom_summary: str,
@@ -344,134 +413,96 @@ def clinical_reason_prompt(
 ข้อมูลจาก Guideline (GROUNDING SOURCE):
 {retrieved_context}
 
-════ GUIDELINE PRIORITY (ใช้ก่อนวิเคราะห์ทุก step) ════
-
-ลำดับความน่าเชื่อถือ:
-  1. แนวทางการดูแลรักษาโรคติดเชื้อเฉียบพลันระบบหายใจในเด็ก (Thai URI Children) — PRIMARY
-     บริบทประเทศไทย ใช้เป็นแนวทางหลักเสมอ
-  2. AAFP 2022 — SUPPORTING REFERENCE
-     ใช้เสริมเมื่อ Thai URI Children ไม่ครอบคลุม หรือยืนยันความถูกต้อง
-  3. หลักเภสัชกรรมทั่วไป / Clinical pharmacology — INFERENCE
-     ใช้เมื่อไม่อยู่ใน guideline ใดเลย ต้องระบุ "(อนุมานตามหลักเภสัชกรรม)"
-
-กฎ Conflict:
-  - ถ้า Thai URI Children และ AAFP 2022 แนะนำต่างกัน → ให้ follow Thai URI Children
-  - ระบุสั้นๆ ในคำตอบว่า "Thai URI Children แนะนำ X (AAFP 2022 แนะนำ Y)"
-  - ห้าม average หรือผสมทั้งสองแนวทาง
-
-กฎ Inference:
-  - ถ้าเคสไม่อยู่ใน guideline ใดเลย → อนุมานตามหลักเภสัชกรรมที่ถูกต้อง
-  - ต้องระบุชัดเจน: "(อนุมานตามหลักเภสัชกรรม ไม่พบใน guideline)"
+════ GUIDELINE PRIORITY ════
+  1. Thai URI Children — PRIMARY
+  2. AAFP 2022 — SUPPORTING
+  3. หลักเภสัชกรรม — INFERENCE (ระบุ "อนุมานตามหลักเภสัชกรรม")
+  Conflict: Thai URI Children wins → ระบุสั้นๆว่า conflict อยู่ตรงไหน
 
 วิเคราะห์ตาม Chain-of-Thought:
 
-STEP 1 — RED FLAG CHECK:
-Epiglottitis: drooling + muffled voice + stridor + leaning forward → has_red_flag=true ทันที
+STEP 1 — RED FLAG CHECK (กำลังเป็นอยู่ตอนนี้เท่านั้น):
+- Epiglottitis: drooling + muffled voice + stridor + leaning forward → has_red_flag=true
+- Severe airway obstruction, Meningitis, Peritonsillar abscess, Anaphylaxis กำลังเกิด
+- Mastoiditis: บวมหลังหู + กดเจ็บ + ไข้สูง (ต้องครบสามอย่าง)
+ไม่ใช่ red flag:
+- ประวัติแพ้ยาในอดีตที่หายแล้ว
+- AOM treatment failure ที่ยังไม่มีบวมหลังหู
 
 STEP 2 — DOMAIN & SCORING:
-AOM: อายุ+น้ำหนัก+ข้างเดียว/สองข้าง+ไข้+otorrhea+เคยได้ amox ล่าสุด
-  ขนาดยา AOM ที่ถูกต้อง: Amoxicillin 80-90 mg/kg/วัน แบ่ง 2 ครั้ง (ห้ามใช้ 40-50 mg/kg)
+AOM: อายุ + น้ำหนัก + ข้างเดียว/สองข้าง + ไข้ + otorrhea + prev amox ล่าสุด
+  ขนาดยา first-line: Amoxicillin 80-90 mg/kg/วัน แบ่ง 2 ครั้ง (ไม่ใช่ 40-50)
   ระยะเวลา: <2 ปีหรือรุนแรง = 10 วัน | 2-5 ปีเบา = 7 วัน | ≥6 ปี = 5-7 วัน
 
-  PREV AMOX RULE (Ref: AAFP 2022 p.633, Thai URI Children):
-  เคยได้ amoxicillin ใน 30 วันที่ผ่านมา → เชื้ออาจดื้อ → เปลี่ยนเป็น Amoxicillin/clavulanate
-  ขนาด: 90 mg/kg/วัน (ส่วน amoxicillin) แบ่ง 2 ครั้ง × 5-10 วัน
-  คำนวณโดสจาก kg จริง: 90 × [น้ำหนัก] = [รวม] mg/วัน → [รวม ÷ 2] mg ทุก 12 ชั่วโมง
-  ตัวอย่าง 25 kg: 90 × 25 = 2,250 mg/วัน → 1,125 mg ทุก 12 ชั่วโมง
+  PREV AMOX RULE (ขยาย window ตาม Thai URI Children):
+  เคยได้ amoxicillin ใน 1-3 เดือน (90 วัน) หรือไปสถานรับเลี้ยงเด็ก
+  → ใช้ High-dose Amoxicillin 80-90 mg/kg/วัน (ไม่ใช่ standard 40-50)
+  *** "3 เดือนก่อน" = อยู่ใน window → ต้องใช้ high-dose ***
 
-  TREATMENT FAILURE RULE (Ref: AAFP 2022 p.633 table 4):
-  อาการไม่ดีขึ้นหรือแย่ลงหลังได้ amoxicillin 48-72 ชั่วโมง
-  Step 1: ตรวจว่าเป็น high-dose amox (80-90 mg/kg) หรือไม่
-    - ถ้าไม่ใช่ → เพิ่มเป็น high-dose amox ก่อน
-    - ถ้าใช่อยู่แล้ว → เปลี่ยนเป็น Amoxicillin/clavulanate 90 mg/kg/วัน
-  คำนวณเช่นเดียวกับ prev amox rule ข้างบน
+  AOM TREATMENT FAILURE (ได้ amox ≥48-72h แล้วยังปวดหู/ไข้ ไม่มีบวมหลังหู):
+  → ไม่ใช่ red flag — เป็น clinical decision
+  → ประเมิน dose ที่ได้: standard (40 mg/kg) หรือ high-dose (80-90 mg/kg)?
+    - Standard → เพิ่มเป็น High-dose Amoxicillin 80-90 mg/kg/วัน × 7-10 วัน
+    - High-dose แล้วยังไม่ดี → Amoxicillin/clavulanate 90 mg/kg/วัน × 7-10 วัน
+  → แนะนำพบแพทย์ถ้าไม่ดีขึ้นใน 48h หรือมีบวมหลังหูเกิดขึ้น
+  → needs_pushback = false, แจ้ง clinical direction ให้ผู้ป่วยนำไปปรึกษาแพทย์
 
-  AOM prev amox dose explicit: คำนวณและระบุ mg จริงทุกครั้ง
+  AOM + Penicillin allergy (detail ครบแล้ว — ชื่อยา + อาการ):
+  → ตอบทันที ห้ามถามซ้ำ
+  → non-severe: Cefdinir 14 mg/kg/วัน หรือ Cefpodoxime 10 mg/kg/วัน × 10 วัน
+  → severe/anaphylaxis: Azithromycin 10 mg/kg วันแรก แล้ว 5 mg/kg × 4 วัน
+  → allergy_detail_incomplete = false (มีรายละเอียดแล้ว)
 
-  WATCHFUL WAITING — ต้องครบทุกเงื่อนไขจึงแนะนำได้ (Ref: AAFP 2022 table 1):
-    [1] อายุ ≥2 ปี
-    [2] unilateral เท่านั้น (bilateral → ATB ทันที)
-    [3] ไข้ <39°C (ไข้ ≥39°C → ATB ทันที)
-    [4] ไม่มี otorrhea
-    [5] อาการปวดไม่รุนแรง (เด็กยังกิน/เล่นได้)
-  ถ้าไม่ครบ → ATB ทันที | ถ้าครบ → watchful waiting + Paracetamol + follow-up 48-72h
+Pharyngitis (Modified Centor/McIsaac):
+  CENTOR ≥4 RULE:
+  → ATB ทันที ห้ามแนะนำ RADT (PPV >50%) | จ่าย Amoxicillin ตาม dose
+  ตัวอย่าง: ไม่ไอ+ไข้+ต่อมโต+หนองทอนซิล+อายุ 3-14 = score 5 → ATB ทันที
 
-  HIGH-SCORE AOM pattern (score ≥ 0.90):
-    - มีอายุ + น้ำหนัก + อาการ + ไม่แพ้ยา → ตอบได้เลย
-    - มี prescription + prev amox (ใน 30 วัน) + อายุ + น้ำหนัก → ตรวจ prev amox rule แล้วตอบ
-Pharyngitis — McIsaac/Modified Centor:
-  ไม่ไอ(+1) ไข้≥38°C(+1) ต่อมน้ำเหลืองกดเจ็บ(+1) ทอนซิลมีหนอง(+1) อายุ3-14(+1) อายุ≥45(-1)
-  Score ≥4 -> ATB ทันที | Score 2-3 -> RADT ก่อน แล้วค่อยให้ ATB ถ้า RADT+ | Score ≤1 -> viral (ไม่ให้ ATB)
-  RADT RULE (สำคัญ): Centor 2-3 -> ต้องแนะนำ RADT หรือ Throat culture ก่อน ห้ามสั่ง ATB เลย
-    ถ้า RADT+ -> ATB | ถ้า RADT- ในเด็ก -> ทำ Throat culture ยืนยัน | ถ้า RADT- ในผู้ใหญ่ -> ไม่ให้ ATB
-  GABHS ยาที่ถูกต้อง:
-    เด็ก: Amoxicillin 50 mg/kg/วัน (สูงสุด 1,000 mg/วัน) แบ่ง 1-2 ครั้ง × 10 วัน (ห้ามใช้ Augmentin)
-    ผู้ใหญ่: Amoxicillin 500 mg TID หรือ 875 mg BID × 10 วัน
-    Penicillin V เด็ก: 250 mg BID-TID × 10 วัน | ผู้ใหญ่: 500 mg BID-TID × 10 วัน
-  แพ้ penicillin เด็ก: Cephalexin 20 mg/kg/dose BID หรือ Azithromycin 12 mg/kg/วัน × 5 วัน
-  EBV ask: ถ้าเจ็บคอ+ต่อมโต+อ่อนเพลียมาก → ถามด้วยว่า "มีอ่อนเพลียมาก ตาบวม หรือน้ำมูกร่วมไหม?" (แยก EBV/Mono)
+  CENTOR 2-3 RULE:
+  → RADT ก่อน | RADT+ → ATB | RADT- เด็ก → Throat culture (ห้ามสรุปว่าไม่ใช่ GABHS โดยไม่มี culture)
+
+  GABHS DOSE (สำคัญ — ใช้ mg/kg สำหรับเด็กเสมอ):
+  เด็ก: Amoxicillin 50 mg/kg/วัน (max 1,000 mg/วัน) แบ่ง 1-2 ครั้ง × 10 วัน
+  *** ห้ามใช้ adult dose 500mg TID กับเด็ก แม้จะอายุ 10 ปีก็ตาม ***
+  ตัวอย่าง: 10 ปี ~30 kg → 50×30 = 1,500 → cap ที่ 1,000 mg → 500mg BID
+  ผู้ใหญ่: 500 mg TID หรือ 875 mg BID × 10 วัน
+
+  EBV/MONO DIFFERENTIAL:
+  ถ้า: เจ็บคอ + อ่อนเพลียมากผิดปกติ + ต่อมน้ำเหลืองโตหลายที่ หรือ ม้ามโต หรือตาบวม
+  → สงสัย EBV Infectious Mononucleosis ไม่ใช่ GABHS
+  → ห้ามให้ Amoxicillin/Ampicillin → เกิดผื่น maculopapular ได้สูง (80%)
+  → แนะนำ: supportive care + พบแพทย์เพื่อ Monospot test
+  → needs_pushback = true ถ้า request ATB
+
+  VIRAL PHARYNGITIS CLEAR RULE (เด็ก <3 ปี + ไอ + น้ำมูก + ท้องเสีย):
+  → viral ชัดเจน → needs_pushback=true, ห้าม RADT, ห้าม ATB
+
 Sinusitis/ABRS:
-  First-line: Amoxicillin/clavulanate 500mg q8h หรือ 875mg q12h × 5-7 วัน
-  แพ้ penicillin: Doxycycline 100mg BID × 5-7 วัน หรือ Levofloxacin 500mg OD × 5 วัน
-  treatment failure: Augmentin high-dose 90 mg/kg/วัน (ระบุ mg คำนวณจาก kg)
+  SEVERITY-FIRST RULE:
+  - Double sickening (หวัดดีแล้วกลับแย่) → ABRS ชัด → แนะนำพบแพทย์รับ Rx
+    *** ไม่ใช่จ่ายยาเอง เพราะต้องตรวจยืนยันและ Rx จากแพทย์ ***
+    → ให้ข้อมูล: "แพทย์น่าจะพิจารณา Amoxicillin/clavulanate 500mg q8h หรือ 875mg q12h × 5-7 วัน"
+    → ระหว่างรอ: Paracetamol + น้ำเกลือล้างจมูก + ดื่มน้ำมาก
+  - Duration ≥10 วันไม่ดีขึ้น (persistent ABRS) → เช่นเดียวกัน → พบแพทย์
+  - Viral rhinosinusitis <10 วัน → supportive care, ไม่ให้ ATB
 
-  ABRS DDx criteria (สำคัญ — ป้องกัน Q3 pattern):
-  <10 วัน ยังไม่รู้ว่า bacterial หรือ viral → DDx = Viral rhinosinusitis สูง, ABRS ต่ำ
-  เว้นแต่มี severe onset (ไข้ ≥39°C + น้ำมูกข้นหนองตั้งแต่ต้น ≥3 วัน) → ABRS แม้ <10 วัน
-  ≥10 วัน ไม่ดีขึ้น → ABRS สูง
-  double sickening (ดีขึ้นแล้วกลับแย่) → ABRS สูง แม้ <10 วัน
-  Warning signs ที่ต้องระบุในคำตอบ sinusitis: ไข้สูง, double sickening, ตาบวม/แดง, ปวดศีรษะรุนแรง
+STEP 3 — ALLERGY ASSESSMENT (semantic):
+ประเมินว่าทราบ allergy detail ครบไหม (กลุ่มยา + ระดับอาการ)
+ถ้าครบ → ระบุ first-line และ alternative ตาม allergy type
+ถ้าไม่ครบ → knowledge_gaps = ["allergy details"] และ allergy_detail_incomplete = true
+  *** ถ้า allergy_detail_incomplete=true → recommendation node ห้ามแนะนำยาทางเลือกใดๆ ***
 
-ANTIBIOTIC ADHERENCE (inference — ใช้เมื่อถามเรื่องหยุดยาก่อนกำหนด):
-ต้องระบุ "(อนุมานตามหลักเภสัชกรรม)" ชัดเจนในคำตอบ
-เหตุผล 3 ข้อที่ต้องอธิบาย:
-  1. Rheumatic fever: GABHS ที่รักษาไม่ครบ → ไข้รูมาติก → ลิ้นหัวใจเสียหายถาวร
-  2. Antibiotic resistance: เชื้อที่เหลือดื้อยาและกลับมาแย่กว่าเดิม
-  3. Relapse: อาการดูดีก่อนเชื้อถูกกำจัดหมด
-แก้ท้องเสีย: probiotic (Lactobacillus) หรือ yogurt live culture ควบคู่ หรือกินยาหลังอาหาร
-
-HONEY CONTRAINDICATION (อนุมานตามหลักเภสัชกรรม):
-น้ำผึ้งห้ามใช้ในเด็ก <1 ปี (เสี่ยง infant botulism) ถ้าแนะนำน้ำผึ้ง ต้องระบุ "สำหรับเด็กอายุ >1 ปีเท่านั้น"
-
-PHARMACIST-CHAT DISCLAIMER RULE:
-เภสัชกรให้คำแนะนำและแนะนำยาตามเกณฑ์คลินิกได้ แต่ต้องระบุท้ายคำตอบว่า
-"ทั้งนี้ เพื่อความปลอดภัยสูงสุด ควรได้รับการตรวจจากแพทย์หรือเภสัชกรโดยตรง หากอาการไม่ดีขึ้นหรือมีข้อสงสัย"
--> ใส่เป็น disclaimer ท้าย ไม่ใช่ปฏิเสธการให้คำแนะนำ
-
-DOSE COMPLETENESS RULE:
-คำตอบต้องระบุครบเสมอ: ชื่อยา + ขนาด (mg) + ความถี่ (TID/BID/OD) + ระยะเวลา (วัน)
-ถ้าไม่รู้น้ำหนัก -> ระบุ mg/kg แล้วถามน้ำหนักท้ายการตอบ
-
-STEP 3 — PRESCRIPTION ETHICS CHECK:
-needs_rx_change_warning=true เมื่อ: ผู้ป่วยขอเปลี่ยนยาตาม Rx แพทย์สั่ง โดยไม่มีเหตุผลทางคลินิก
-  → เภสัชกรไม่มีอำนาจเปลี่ยน Rx เอง ต้องแนะนำให้กลับไปปรึกษาแพทย์ผู้สั่ง
-
-PREV-AMOX SAFETY OVERRIDE (ข้อยกเว้น prescription ethics — อ้าง AAFP 2022 p.633 table 4):
-ถ้า prescription สั่ง Amoxicillin แต่มีหนึ่งในนี้:
-  กรณี A: เคยได้ amoxicillin ใน 30 วันที่ผ่านมา
-  กรณี B: ได้ amox ครบแล้วแต่อาการไม่ดีขึ้นใน 48-72 ชั่วโมง (treatment failure)
-→ needs_rx_change_warning = FALSE
-→ แนะนำ: Amoxicillin/clavulanate 90 mg/kg/วัน (amox component) แบ่ง 2 ครั้ง × 5-10 วัน
-→ คำนวณโดส: 90 × [น้ำหนัก kg] = [รวม] mg/วัน → [รวม ÷ 2] mg ทุก 12 ชั่วโมง
-→ อธิบายเหตุผล: เชื้ออาจดื้อต่อ amoxicillin เพียงอย่างเดียว จำเป็นต้องใช้สูตรผสมที่ครอบคลุมกว่า
-ตัวอย่าง 25 kg: 90 × 25 = 2,250 mg/วัน → 1,125 mg ทุก 12 ชั่วโมง (Ref: AAFP 2022 p.633 table 4)
-
-STEP 4 — ALLERGY ASSESSMENT:
-ถ้ามีประวัติแพ้ penicillin → ประเมิน severity:
-  - ผื่นธรรมดา/ไม่รุนแรง: อาจใช้ cephalosporin รุ่น 3-4 ได้ (cross-reactivity <2%)
-  - ลมพิษ/angioedema: หลีกเลี่ยง beta-lactam ใช้ macrolide/clindamycin/doxycycline
-  - Anaphylaxis/SJS: ห้าม penicillin และ cephalosporin ทุกชนิด
+STEP 4 — COMPLIANCE / ADHERENCE:
+ATB ครบ course, ท้องเสีย probiotic
 
 STEP 5 — NEGATIVE CASE DETECTION:
 needs_pushback=true เมื่อ:
 - ขอ ATB แต่ Centor ≤1 หรือ sinusitis <10 วันไม่รุนแรง
 - ขอยาแก้ไอ/ลดน้ำมูกสำหรับเด็ก <4 ปี
-- ขอ ATB แต่อาการเป็น viral ชัด (มีไอ + น้ำมูกใส + ไม่มีไข้สูง)
-- incomplete_9 pattern: เจ็บคอสั้นๆ ยังไม่รู้ Centor score → ต้องซักประวัติ ห้ามสรุปว่าเป็นไวรัสก่อน
+- ขอ ATB แต่อาการเป็น viral ชัด
+- เด็ก <3 ปี + ไอ + น้ำมูก + ท้องเสีย
 
-STEP 6 — DDx:
-เรียง differential diagnosis 1-3 อย่างตาม confidence
-ระบุ clinical_scores (Centor score, AOM severity, ABRS criterion)
+STEP 6 — DDx: เรียง 1-3 อย่างตาม confidence + clinical_scores
 
 ตอบด้วย JSON เท่านั้น:
 {{
@@ -480,7 +511,7 @@ STEP 6 — DDx:
     {{"name": "<โรค>", "confidence": "<high|medium|low>", "reasoning": "<เหตุผล>"}}
   ],
   "clinical_rationale": ["<เหตุผลคลินิกแต่ละข้อ>"],
-  "red_flags": ["<red flag ที่พบ หรือ []>"],
+  "red_flags": ["<red flag ที่กำลังเกิดอยู่ตอนนี้ — ว่างถ้าไม่มี>"],
   "knowledge_gaps": ["<ข้อมูลที่ยังขาด หรือ []>"],
   "clinical_scores": {{
     "mcisaac": <int หรือ null>,
@@ -489,36 +520,41 @@ STEP 6 — DDx:
   }},
   "needs_pushback": <true|false>,
   "pushback_reason": "<เหตุผลที่ต้องปฏิเสธยา หรือ null>",
-  "needs_rx_change_warning": <true|false>
+  "needs_rx_change_warning": <true|false>,
+  "allergy_detail_incomplete": <true|false — true เมื่อมีการพูดถึงแพ้ยาแต่ไม่รู้ชื่อยาหรืออาการ>
 }}"""
 
+
+# ─────────────────────────────────────────────────────────────
+#  safety_gate_prompt  (v10 — explicit AOM treatment failure guard)
+# ─────────────────────────────────────────────────────────────
 
 RED_FLAG_LIST = [
     "Epiglottitis: drooling + muffled voice + stridor + leaning forward",
     "Severe airway obstruction: หายใจลำบากรุนแรง หอบขณะพัก",
     "Meningitis signs: ไข้สูง + stiff neck + altered consciousness",
     "Peritonsillar abscess: ปวดมากข้างเดียว trismus uvula deviation",
-    "Anaphylaxis: ผื่นลามทั่วตัว หน้าบวม ลำคอบวม หายใจลำบาก",
-    "Mastoiditis: บวมหลังหู กดเจ็บ ไข้สูง",
-    "Intracranial complication: ปวดศีรษะรุนแรงหลัง sinusitis",
+    "Anaphylaxis: ผื่นลามทั่วตัว หน้าบวม ลำคอบวม หายใจลำบาก กำลังเกิดอยู่ตอนนี้",
+    "Mastoiditis: บวมหลังหู + กดเจ็บหลังหู + ไข้สูง (ต้องครบทั้งสามอย่าง)",
+    "Intracranial complication: ปวดศีรษะรุนแรงหลัง sinusitis + altered consciousness",
 ]
 
 
 def safety_gate_prompt(symptom_summary: str, ddx_list: str) -> str:
     flags = "\n".join(f"  - {f}" for f in RED_FLAG_LIST)
-    return f"""ตรวจสอบ red flags เฉพาะอาการปัจจุบัน — err on the side of caution
+    return f"""ตรวจสอบ red flags เฉพาะอาการที่กำลังเป็นอยู่ตอนนี้เท่านั้น
 
 อาการสรุป: {symptom_summary}
 การวินิจฉัยเบื้องต้น: {ddx_list}
 
-Red Flags ที่ต้องส่ง ER ทันที (เฉพาะอาการที่กำลังเป็นอยู่ตอนนี้เท่านั้น):
+Red Flags ที่ต้องส่ง ER ทันที:
 {flags}
 
 กฎสำคัญ — ห้าม trigger red flag กรณีเหล่านี้:
-- ประวัติแพ้ยาในอดีต (เคยแพ้ amoxicillin / penicillin เมื่อนานมาแล้ว) ไม่ใช่ red flag ปัจจุบัน
-- "เคยแพ้ยา" หรือ "เคยต้องฉีด epinephrine ในอดีต" = ประวัติแพ้ยา ไม่ใช่ภาวะฉุกเฉินตอนนี้
-- anaphylaxis ที่หายแล้วและผู้ป่วยมาร้านยาได้ปกติ = ไม่ใช่ red flag
-- red flag ต้องเป็น: อาการฉุกเฉินที่กำลังเป็นอยู่ตอนนี้ เช่น กำลังหายใจลำบาก กำลังกลืนไม่ได้ กำลังมีเสียงดังขณะหายใจ
+- ประวัติแพ้ยาในอดีตที่หายแล้ว = ไม่ใช่ red flag ปัจจุบัน
+- AOM ได้ ATB 3-5 วันแล้วยังไม่ดีขึ้น = treatment failure ไม่ใช่ Mastoiditis
+  เว้นแต่มีบวมหลังหู + กดเจ็บหลังหูชัดเจนด้วย
+- red flag ต้องเป็นอาการฉุกเฉินที่กำลังเกิดขึ้น ณ ตอนนี้
 
 ถ้าพบ red flag จริง → อธิบายเหตุผล 1-2 ประโยคก่อนแนะนำ ER
 
@@ -526,10 +562,14 @@ Red Flags ที่ต้องส่ง ER ทันที (เฉพาะอ�
 {{
   "has_red_flag": <true|false>,
   "red_flags_found": ["<red flag ปัจจุบันที่พบ — ว่างถ้าไม่มี>"],
-  "refer_explanation": "<อธิบายว่าทำไมอาการนี้จึงอันตรายตอนนี้ 1-2 ประโยค — null ถ้าไม่มี red flag>",
-  "refer_reason": "<ข้อความแจ้งผู้ป่วย รวม explanation + แนะนำ ER — null ถ้าไม่มี red flag>"
+  "refer_explanation": "<อธิบายว่าทำไมอาการนี้จึงอันตรายตอนนี้ 1-2 ประโยค — null ถ้าไม่มี>",
+  "refer_reason": "<ข้อความแจ้งผู้ป่วย รวม explanation + แนะนำ ER — null ถ้าไม่มี>"
 }}"""
 
+
+# ─────────────────────────────────────────────────────────────
+#  recommendation_prompt  (v10)
+# ─────────────────────────────────────────────────────────────
 
 def recommendation_prompt(
     symptom_summary: str,
@@ -549,21 +589,32 @@ def recommendation_prompt(
             "วิธีตอบ:\n"
             "- อธิบายว่าทำไมยาที่ขอจึงไม่เหมาะสม (เหตุผลทางคลินิกจาก Guideline)\n"
             "- แนะนำการรักษาที่ถูกต้องแทน\n"
-            "- ยืนหยัดแม้ผู้ป่วยจะยืนยัน - แต่ใช้น้ำเสียงนุ่มนวล\n"
+            "- ยืนหยัดแม้ผู้ป่วยจะยืนยัน — แต่ใช้น้ำเสียงนุ่มนวล\n"
         )
-
-    # scores ใช้ internally เท่านั้น — ห้าม leak ออกสู่ผู้ใช้
-    scores_text = ""
 
     rx_change_instruction = ""
     if clinical_scores and clinical_scores.get("needs_rx_change_warning"):
         rx_change_instruction = (
-            "\nPRESCRIPTION ETHICS CASE:\n"
-            "ผู้ป่วยขอเปลี่ยนยาตาม Rx แพทย์สั่ง -> ต้องอธิบาย:\n"
-            "1. ยาที่แพทย์สั่งและยาที่ขอเปลี่ยนมีประสิทธิภาพเทียบเท่ากันทางคลินิก (ถ้าจริง)\n"
-            "2. อย่างไรก็ตาม เภสัชกรไม่มีอำนาจแก้ไขใบสั่งแพทย์ตามดุลยพินิจของตัวเอง\n"
-            "3. แนะนำให้ผู้ป่วยติดต่อแพทย์ผู้สั่งโดยตรงเพื่อขอเปลี่ยนยา\n"
-            "ห้ามบอกผู้ป่วยว่า 'สามารถเปลี่ยนได้' หรือแนะนำยาทางเลือกในกรณีนี้\n"
+            "\nPRESCRIPTION ETHICS — กฎเหล็ก:\n"
+            "ผู้ป่วยขอเปลี่ยนยาจาก Rx แพทย์สั่ง\n"
+            "สิ่งที่ทำได้:\n"
+            "  - อธิบายข้อมูลทางคลินิก เช่น ยา A กับ B ใช้รักษาโรคเดียวกันได้\n"
+            "  - แจ้งว่า 'ขึ้นอยู่กับดุลยพินิจของแพทย์ผู้สั่ง'\n"
+            "สิ่งที่ห้ามทำเด็ดขาด:\n"
+            "  - ห้ามบอกว่า 'สามารถเปลี่ยนได้' หรือ 'ให้ผลเทียบเท่าจึงเปลี่ยนได้เลย'\n"
+            "  - ห้ามจ่ายยาตัวใหม่แทนโดยไม่ผ่านแพทย์\n"
+            "  - ห้ามแนะนำยาทางเลือกเป็น 'ตัวเลือก' ให้ผู้ป่วยตัดสินใจเอง\n"
+            "วิธีตอบ: ให้ข้อมูลทางวิชาการ + ระบุชัดว่าต้องกลับไปปรึกษาแพทย์ผู้สั่งเพื่อขอเปลี่ยน Rx\n"
+        )
+
+    # Guard: allergy vague → ห้าม recommend ยาทางเลือก
+    allergy_vague_guard = ""
+    if clinical_scores and clinical_scores.get("allergy_detail_incomplete"):
+        allergy_vague_guard = (
+            "\nALLERGY INCOMPLETE — ห้าม recommend ยาทางเลือก:\n"
+            "ผู้ป่วยมีประวัติแพ้ยาแต่รายละเอียดยังไม่ครบ (ไม่รู้ชื่อยา หรือไม่รู้อาการแพ้)\n"
+            "ห้ามแนะนำยาทางเลือกใดๆ ก่อนได้รายละเอียดครบ — เพราะอาจแนะนำยาที่ผู้ป่วยแพ้อยู่ก็ได้\n"
+            "ให้บอกว่า: 'ต้องทราบรายละเอียดการแพ้ยาก่อน จึงจะแนะนำยาที่ปลอดภัยให้ได้ครับ'\n"
         )
 
     return f"""คุณเป็นเภสัชกรที่กำลังให้คำแนะนำยาและการดูแลตัวเอง
@@ -571,7 +622,7 @@ def recommendation_prompt(
 ประวัติการสนทนา:
 {history_text or "(ไม่มีประวัติ)"}
 
-อาการสรุป: {symptom_summary}{scores_text}
+อาการสรุป: {symptom_summary}
 การวินิจฉัยเบื้องต้น: {ddx_text}
 เหตุผลทางคลินิก: {rationale_text}
 
@@ -579,36 +630,42 @@ def recommendation_prompt(
 {retrieved_context}
 {pushback_instruction}
 {rx_change_instruction}
+{allergy_vague_guard}
 
 แนวทางการเขียน:
-1. ห้ามใส่ตัวเลขอ้างอิง [1] [2] [N] และห้ามใส่ส่วน "แหล่งที่มา" ในคำตอบ
-2. ห้ามแสดงคะแนน McIsaac, Centor, AOM severity ในคำตอบ — ใช้เป็นข้อมูลหลังบ้านเท่านั้น
-3. ห้ามใช้ emoji ทุกกรณี (ไม่มี ⚠️ ℹ️ ✅ หรืออื่นๆ)
-
-GUIDELINE PRIORITY — ใช้ในการเขียนคำตอบ:
-  Thai URI Children = PRIMARY | AAFP 2022 = SUPPORTING | หลักเภสัชกรรม = INFERENCE
-  Conflict: "ตามแนวทาง Thai URI Children แนะนำ X (AAFP 2022 แนะนำ Y)"
-  Inference: ต้องระบุ "(อนุมานตามหลักเภสัชกรรม)" ทุกครั้ง ห้ามละเว้น
-
-RX CHANGE STRUCTURE (เมื่อผู้ป่วยขอเปลี่ยนยาแพทย์สั่ง):
-  [ย่อหน้าแรก] กำชับทันที: "การเปลี่ยนยาในใบสั่งแพทย์ต้องผ่านแพทย์ผู้สั่งเท่านั้นครับ เภสัชกรไม่มีอำนาจแก้ไข Rx เองได้"
-  [ย่อหน้ากลาง] ให้ข้อมูล: อธิบาย guideline conflict, ความเสี่ยง, ข้อดีข้อเสียของยาแต่ละตัว
-  [ย่อหน้าท้าย] กำชับอีกครั้ง: "แนะนำนำใบสั่งยากลับไปปรึกษาแพทย์โดยตรง เพื่อให้แพทย์พิจารณาปรับตามความเหมาะสมครับ"
-
-ANTIBIOTIC STOP EARLY (เมื่อถามเรื่องหยุดยาก่อนกำหนด):
-  ต้องระบุ "(อนุมานตามหลักเภสัชกรรม)" + อธิบาย 3 เหตุผล:
-  1. Rheumatic fever — ลิ้นหัวใจเสียหายถาวรถ้ารักษาไม่ครบ
-  2. เชื้อดื้อยา — กลับมาแย่กว่าเดิม
-  3. Relapse — เชื้อยังไม่หมดแม้อาการดีขึ้น
-  แก้ท้องเสีย: probiotic / yogurt live culture หรือกินยาหลังอาหาร
-
-4. DOSE COMPLETENESS: ระบุครบ ชื่อยา + ขนาด mg + ความถี่ + ระยะเวลา
-5. RADT: Centor 2-3 → บอกว่า "ถ้า RADT+ ให้ Amoxicillin [ขนาด] × 10 วัน"
-6. OME: สังเกต 3 เดือน → ENT → PE tube ถ้าไม่ดีขึ้น
-7. WATCHFUL WAITING: ยาแก้ปวด + กลับมาใน 48-72h + consent ผู้ปกครอง
-8. HONEY: ถ้าแนะนำน้ำผึ้ง ต้องระบุ "สำหรับเด็กอายุ >1 ปีเท่านั้น"
-9. DISCLAIMER: ท้ายคำตอบเสมอ "ทั้งนี้ หากอาการไม่ดีขึ้น ควรพบแพทย์โดยตรงครับ"
-10. FORMAT: ไม่เกิน 290 คำ, UNDERLINE __ชื่อยา__ เฉพาะในส่วน "ยาที่แนะนำ"
+1. ห้ามใส่ตัวเลขอ้างอิง [N] และห้ามใส่ส่วน "แหล่งที่มา"
+2. ห้ามแสดงคะแนน McIsaac, Centor, AOM severity ในคำตอบ
+3. OUTPUT SAFETY: ห้ามใช้ double-quote ภายใน string ใน JSON — ใช้ single-quote แทน
+   ห้ามใช้ backslash นอก escape sequence จำเป็น
+4. SEVERITY-FIRST: เมื่ออาการต้องการ Rx จากแพทย์ (ABRS double sickening, treatment failure)
+   → แนะนำพบแพทย์ก่อน + บอกว่า "แพทย์น่าจะพิจารณา [ยา X]" เพื่อ informed decision
+   → ให้ supportive care ระหว่างรอ
+   *** ห้ามสั่งจ่าย ATB สำหรับ ABRS เองโดยไม่มี Rx ***
+5. CENTOR ≥4: ATB ทันที ห้าม recommend RADT ห้าม hedge
+6. GABHS DOSE — ใช้ mg/kg เสมอสำหรับเด็ก:
+   เด็ก: 50 mg/kg/วัน (max 1,000 mg) × 10 วัน *** ห้ามใช้ adult dose ***
+   ถ้าไม่รู้น้ำหนัก: ประมาณตามอายุ และ cap ที่ max dose
+   ตัวอย่าง 10 ปี ~30 kg → 1,500 mg → cap 1,000 mg → 500mg BID
+7. EBV WARNING: ถ้าสงสัย EBV (อ่อนเพลียมาก + ต่อมโตหลายที่)
+   → ห้ามแนะนำ Amoxicillin → แนะนำพบแพทย์เพื่อ Monospot test
+8. ALLERGY INCOMPLETE (allergy_detail_incomplete=true):
+   ถามรายละเอียดก่อน: ชื่อยา + อาการ + นานแค่ไหน + เคยใช้ซ้ำไหม
+   *** ห้ามส่งกลับแพทย์ทันทีโดยไม่ถามก่อน ***
+9. RADT- เด็ก: ต้องระบุ "ถ้า RADT- ควรทำ Throat culture ยืนยัน ก่อนสรุปว่าไม่ใช่ GABHS"
+10. TREATMENT FAILURE: ให้ clinical direction ก่อนแนะนำพบแพทย์
+    "อาการบ่งชี้ว่าอาจต้องปรับยา แพทย์น่าจะพิจารณา [ยา] แนะนำพาพบแพทย์เพื่อตรวจและปรับยาครับ"
+11. COMPLIANCE COUNSELING เมื่อจ่าย ATB: อธิบายเหตุผลกินให้ครบ
+   1) ป้องกัน Rheumatic fever  2) ป้องกัน antibiotic resistance  3) ลด recurrence
+   แก้ท้องเสีย: probiotic / yogurt live culture หรือกินยาหลังอาหาร
+   1) ป้องกัน Rheumatic fever  2) ป้องกัน antibiotic resistance  3) ลด recurrence
+   แก้ท้องเสีย: probiotic / yogurt live culture หรือกินยาหลังอาหาร
+8. DOSE COMPLETENESS: ระบุครบ ชื่อยา + ขนาด mg + ความถี่ + ระยะเวลา
+9. RADT: Centor 2-3 → บอกว่า "ถ้า RADT+ ให้ Amoxicillin [ขนาด] × 10 วัน"
+10. OME: สังเกต 3 เดือน → ENT → PE tube ถ้าไม่ดีขึ้น
+11. WATCHFUL WAITING: ยาแก้ปวด + กลับมาใน 48-72h + *** ถามผู้ปกครองก่อนว่าพร้อมไหม ***
+12. HONEY: ถ้าแนะนำน้ำผึ้ง ต้องระบุ "สำหรับเด็กอายุ >1 ปีเท่านั้น"
+13. DISCLAIMER: ท้ายคำตอบเสมอ "ทั้งนี้ หากอาการไม่ดีขึ้น ควรพบแพทย์โดยตรงครับ"
+14. FORMAT: ไม่เกิน 290 คำ, UNDERLINE __ชื่อยา__ เฉพาะในส่วน "ยาที่แนะนำ"
 
 โครงสร้าง (ห้าม emoji ห้าม [N]):
 ## สรุปสถานการณ์
@@ -636,6 +693,10 @@ ANTIBIOTIC STOP EARLY (เมื่อถามเรื่องหยุดย
   "augmented_notes": "<ข้อมูลเสริม หรือ null>"
 }}"""
 
+
+# ─────────────────────────────────────────────────────────────
+#  Helpers
+# ─────────────────────────────────────────────────────────────
 
 def _format_history_short(history: list[dict], turns: int = 4) -> str:
     if not history:

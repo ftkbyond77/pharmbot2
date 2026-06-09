@@ -1,19 +1,19 @@
 """
-agent/nodes/clinical_reason.py  (v2 — Tuned)
+agent/nodes/clinical_reason.py  (v3)
 ----------------------------------------------
-Node 4: Clinical reasoning — Augmented Generation
+Base: v2
 
-CHANGES v2:
-- Extracts clinical_scores (Centor, AOM severity, sinusitis criteria) from LLM
-- Extracts needs_pushback + pushback_reason for Negative Case handling
-- Passes symptom_domain + symptom_complexity from clarify into query building
-- Structured parse with graceful degradation per field
+Changes v3:
+- Parse + return allergy_detail_incomplete จาก LLM JSON
+  → ส่งต่อให้ recommendation_node ใช้ guard ห้ามแนะนำยาทางเลือก
+  → ส่งต่อให้ safety_gate รู้ว่า allergy ยังไม่ครบ
 
 Input  : state.user_message, state.history, state.retrieved_chunks,
          state.symptom_domain, state.symptom_complexity
 Output : state.symptom_summary, state.differential_diagnosis,
          state.clinical_rationale, state.red_flags_found,
          state.clinical_scores, state.needs_pushback, state.pushback_reason,
+         state.allergy_detail_incomplete,   ← ใหม่ v3
          state.next_action
 """
 
@@ -57,49 +57,60 @@ def clinical_reason_node(state: AgentState) -> dict:
     ])
 
     # ── Parse with field-level graceful degradation ───────────
-    symptom_summary: list[str]  = []
-    ddx: list[DDxItem]          = []
-    rationale: list[str]        = []
-    red_flags: list[str]        = []
-    knowledge_gaps: list[str]   = []
-    clinical_scores: dict       = {}
-    needs_pushback: bool        = False
-    pushback_reason: str | None = None
+    symptom_summary: list[str]     = []
+    ddx: list[DDxItem]             = []
+    rationale: list[str]           = []
+    red_flags: list[str]           = []
+    knowledge_gaps: list[str]      = []
+    clinical_scores: dict          = {}
+    needs_pushback: bool           = False
+    pushback_reason: str | None    = None
+    needs_rx_change_warning: bool  = False
+    allergy_detail_incomplete: bool = False   # v3
 
     try:
         raw  = strip_fences(response.content)
         data = json.loads(raw)
 
-        symptom_summary = _ensure_list(data.get("symptom_summary", []))
-        ddx             = _parse_ddx(data.get("differential_diagnosis", []))
-        rationale       = _ensure_list(data.get("clinical_rationale", []))
-        red_flags       = _ensure_list(data.get("red_flags", []))
-        knowledge_gaps  = _ensure_list(data.get("knowledge_gaps", []))
-        clinical_scores = data.get("clinical_scores", {}) or {}
-        needs_pushback  = bool(data.get("needs_pushback", False))
-        pushback_reason = data.get("pushback_reason")
+        symptom_summary          = _ensure_list(data.get("symptom_summary", []))
+        ddx                      = _parse_ddx(data.get("differential_diagnosis", []))
+        rationale                = _ensure_list(data.get("clinical_rationale", []))
+        red_flags                = _ensure_list(data.get("red_flags", []))
+        knowledge_gaps           = _ensure_list(data.get("knowledge_gaps", []))
+        clinical_scores          = data.get("clinical_scores", {}) or {}
+        needs_pushback           = bool(data.get("needs_pushback", False))
+        pushback_reason          = data.get("pushback_reason")
+        needs_rx_change_warning  = bool(data.get("needs_rx_change_warning", False))
+        allergy_detail_incomplete = bool(data.get("allergy_detail_incomplete", False))  # v3
 
     except json.JSONDecodeError as exc:
         logger.warning(f"[clinical_reason] JSON parse failed: {exc} — using raw text")
         symptom_summary = [symptom_text[:200]]
 
+    # ── Merge needs_rx_change_warning into clinical_scores ────
+    # recommendation_node อ่าน clinical_scores["needs_rx_change_warning"]
+    if needs_rx_change_warning:
+        clinical_scores["needs_rx_change_warning"] = True
+
     logger.info(
         f"[clinical_reason] ddx={[d['name'] for d in ddx[:3]]} "
         f"red_flags={red_flags} needs_pushback={needs_pushback} "
-        f"centor={clinical_scores.get('centor_score')} "
+        f"allergy_incomplete={allergy_detail_incomplete} "
+        f"centor={clinical_scores.get('mcisaac')} "
         f"aom={clinical_scores.get('aom_severity')}"
     )
 
     return {
-        "symptom_summary":         symptom_summary,
-        "differential_diagnosis":  ddx,
-        "clinical_rationale":      rationale,
-        "red_flags_found":         red_flags,
-        "knowledge_gaps":          knowledge_gaps,
-        "clinical_scores":         clinical_scores,
-        "needs_pushback":          needs_pushback,
-        "pushback_reason":         pushback_reason,
-        "next_action":             "safety_gate",
+        "symptom_summary":          symptom_summary,
+        "differential_diagnosis":   ddx,
+        "clinical_rationale":       rationale,
+        "red_flags_found":          red_flags,
+        "knowledge_gaps":           knowledge_gaps,
+        "clinical_scores":          clinical_scores,
+        "needs_pushback":           needs_pushback,
+        "pushback_reason":          pushback_reason,
+        "allergy_detail_incomplete": allergy_detail_incomplete,  # v3
+        "next_action":              "safety_gate",
     }
 
 
@@ -113,21 +124,21 @@ def _build_symptom_narrative(state: AgentState) -> str:
     3. Fall back to recent user turns
     """
     symptom_summary: list[str] = state.get("symptom_summary", [])
-    domain      = state.get("symptom_domain", "general")
-    complexity  = state.get("symptom_complexity", "moderate")
+    domain     = state.get("symptom_domain", "general")
+    complexity = state.get("symptom_complexity", "moderate")
 
     if symptom_summary:
         base = " | ".join(symptom_summary)
         return f"[Domain: {domain}, Complexity: {complexity}] {base}"
 
-    history = state.get("history", [])
+    history    = state.get("history", [])
     user_turns = [
         h["content"]
         for h in history
         if h.get("role") == "user"
     ][-4:]
 
-    parts = user_turns + [state["user_message"]]
+    parts     = user_turns + [state["user_message"]]
     narrative = " ".join(p.strip() for p in parts if p.strip())
     return f"[Domain: {domain}, Complexity: {complexity}] {narrative}"
 
