@@ -49,9 +49,16 @@ def _clean_for_prompt(text: str) -> str:
 def _parse_judge_json(raw: str) -> dict | None:
     """Parse LLM output — เดิมใช้ json.loads ตรงๆ, เพิ่ม fallback"""
     raw = raw.strip()
-    # เดิม: strip markdown fence
+    # 1. จัดการ markdown fence แบบปลอดภัยขึ้น ป้องกันกรณีถูกตัดจบจนไม่มี '}'
     if raw.startswith("```"):
-        raw = raw[raw.find("{"):raw.rfind("}") + 1]
+        start_idx = raw.find("{")
+        end_idx = raw.rfind("}")
+        if start_idx != -1:
+            raw = raw[start_idx:end_idx + 1] if end_idx > start_idx else raw[start_idx:]
+            
+    # 2. แปลง newline เป็น space ป้องกัน json.loads พังเวลาตกหล่น \n ใน string
+    raw = raw.replace("\n", " ")
+
     # ลอง parse ปกติก่อน
     try:
         return json.loads(raw)
@@ -145,11 +152,21 @@ async def judge_cases(req: JudgeRequest):
         "verdict: score>=7=PASS, 4-6=PARTIAL, <=3=FAIL. "
         f"ตอบ JSON เท่านั้น: {json_schema}"
     )
-
+    
     try:
         from google import genai as google_genai
+        from google.genai import types as gtypes
         client   = google_genai.Client(api_key=cfg.gemini_api_key)
-        response = client.models.generate_content(model=cfg.gemini_model, contents=prompt)
+        
+        # บังคับ output เป็น JSON และเพิ่ม max_output_tokens เพื่อไม่ให้คำตอบยาวๆ ถูกตัดจบ
+        response = client.models.generate_content(
+            model=cfg.gemini_model, 
+            contents=prompt,
+            config=gtypes.GenerateContentConfig(
+                response_mime_type="application/json",
+                max_output_tokens=8192
+            )
+        )
         raw      = response.text.strip()
 
         data = _parse_judge_json(raw)
