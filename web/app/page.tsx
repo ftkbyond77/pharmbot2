@@ -3,7 +3,7 @@
 import { useState, useCallback } from "react";
 import Sidebar from "@/components/Sidebar";
 import ChatWindow from "@/components/ChatWindow";
-import { Message } from "@/types";
+import { Message, ResponseType } from "@/types";
 import { sendMessage, clearSession } from "@/lib/api";
 import { generateId } from "@/lib/utils";
 
@@ -43,11 +43,11 @@ export default function HomePage() {
         role: "assistant",
         text: res.message,
         timestamp: new Date().toISOString(),
-        responseType: res.type,
-        diagnosis: res.diagnosis,
-        sources: res.sources,
-        redFlags: res.red_flags,
-        referToDoctor: res.refer_to_doctor,
+        responseType: res.type as ResponseType,
+        diagnosis:   res.diagnosis,
+        sources:     res.sources,
+        redFlags:    res.red_flags,
+        referToDoctor:      res.refer_to_doctor,
         clarifyingQuestion: res.clarifying_question,
       };
 

@@ -1,41 +1,29 @@
 """
-prompts/pharmacist.py — v13
-Base: v12
+prompts/pharmacist.py — v16
+Base: v15
 
-Changes v13 — หลักการ ไม่ใช่แค่ fix case:
+Changes v16 — 4 หลักการ ไม่ใช่แค่ fix case:
 ─────────────────────────────────────────────────────────────
-1. SEVERITY-FIRST PRINCIPLE (medium_4):
-   ATB ที่ต้องการ Rx จากแพทย์ (ABRS double sickening, sinusitis รุนแรง)
-   → แนะนำพบแพทย์ก่อนเสมอ ให้ข้อมูลยาเพื่อ inform ได้ แต่ไม่ใช่สั่งจ่ายเอง
-   หลักการ: ร้านยาจ่าย ATB ได้บางกรณี แต่ถ้ามีความซับซ้อนหรือต้องตรวจยืนยัน
-   → แนะนำพบแพทย์ + บอกว่าแพทย์น่าจะให้ยาอะไร (เพื่อ informed decision)
+RC1 — CENTOR 2-3 = UNCERTAIN: ห้ามสรุปทั้งสองทาง (medium_6)
+  Wrong: เห็น partial Centor → ตัดสินใจเองว่าไวรัสหรือแบคทีเรีย
+  Right: Centor 2-3 = ยังไม่รู้ → RADT เสมอ ห้าม conclude
 
-2. DOSE BY WEIGHT กับ DOSE BY AGE (medium_1, medium_2):
-   เด็กต้องใช้ mg/kg เสมอ ห้ามใช้ adult dose แม้น้ำหนักจะไม่ทราบ
-   → ถ้าไม่รู้น้ำหนัก: บอก range (เช่น เด็ก 10 ปี ~30-40 kg → 50mg/kg = 1,500-2,000 mg/วัน)
-   → ถ้า dose mg/kg เกิน max → cap ที่ max dose
-   AOM rule: 80-90 mg/kg ทุกกรณี (ไม่มีข้อยกเว้น)
-   GABHS rule: 50 mg/kg (max 1,000 mg/วัน) ไม่ใช่ 500mg TID สำหรับเด็ก
+RC2 — RX + SEVERE ALLERGY: เภสัชกรต้องตรวจสอบ Rx ก่อนจ่าย (hard_11)
+  Wrong: Rx → PRESCRIPTION ETHICS → ส่งกลับแพทย์ทันที
+  Right: Rx + penicillin anaphylaxis → ตรวจว่า Rx เป็นยาอะไร → ถ้า
+         อยู่ในกลุ่มที่แพ้ → แจ้งผู้ป่วย + เสนอทางเลือก + แนะนำปรึกษาแพทย์
 
-3. ALLERGY CLARIFICATION — PEN-FAST (incomplete_3, incomplete_10):
-   ต้องถาม 4 ข้อเสมอ รวมถึง: เกิดขึ้นนานแค่ไหน + เคยใช้ซ้ำหลังจากนั้นไหม
-   เพราะ >5 ปี = IgE มักหายแล้ว อาจไม่ใช่ true allergy
-   เคยใช้ซ้ำแล้วไม่แพ้ = อาจไม่ใช่ true allergy ด้วย
+RC3 — PHARYNGITIS COMPLETENESS: ต้องรู้ Centor criteria ครบก่อนตัดสิน (incomplete_5)
+  Wrong: เห็นหนองทอนซิล+ไข้ → score สูง → ข้าม clarify → ถามแค่ allergy
+  Right: ต้องรู้ครบ: อายุ + ไอ/ไม่ไอ + ไข้ + ต่อมน้ำเหลือง + หนองทอนซิล
 
-4. EBV/Mono differential (incomplete_2):
-   Pharyngitis + อ่อนเพลียมาก + ต่อมโตหลายที่ → ต้องถาม EBV signs
-   ถ้าสงสัย EBV → ห้ามให้ Amoxicillin (อาจทำให้เกิดผื่น maculopapular)
+RC4 — PEN-FAST 5 ข้อ ไม่ใช่ 4 (incomplete_10)
+  เพิ่มข้อ 5: รักษาอาการแพ้ด้วยยาอะไร (antihistamine vs epinephrine)
+  → บ่งชี้ severity และ guide ว่า cross-reactivity risk ระดับไหน
 
-5. AOM + penicillin allergy ชัด → ตอบยาทางเลือกทันที (medium_8):
-   ถ้ารู้แล้วว่าแพ้ penicillin → ไม่ต้องถาม prev amox อีก
-   ให้ Cefdinir/Cefpodoxime (non-severe) หรือ Azithromycin (severe)
-
-6. RADT- เด็ก → Throat culture (medium_6):
-   ต้องระบุชัดว่า "ถ้า RADT- ในเด็ก → ทำ Throat culture ยืนยัน ก่อนสรุปว่าไม่ใช่ GABHS"
-
-7. AOM Treatment failure → ให้ clinical direction (neg_3):
-   ต้องบอกว่า "แพทย์น่าจะพิจารณา Amoxicillin/clavulanate" ก่อนแนะนำพบแพทย์
-   ไม่ใช่แค่บอก "ต้องพบแพทย์" โดยไม่ให้ context
+PRINCIPLE เพิ่มเติม: SUPPORTIVE CARE ก่อนพบแพทย์
+  ทุกเคสที่แนะนำพบแพทย์ → ต้องให้ supportive care ระหว่างรอด้วยเสมอ
+  เพราะผู้ป่วยอาจไม่สะดวกไปทันที (กลางดึก ไม่มีรถ ฯลฯ)
 """
 
 from __future__ import annotations
@@ -112,13 +100,15 @@ CLINICAL DOSES — ใช้ mg/kg สำหรับเด็กเสมอ �
 - GABHS/Pharyngitis ผู้ใหญ่: Amoxicillin 500 mg TID หรือ 875 mg BID × 10 วัน
 - ABRS first-line (ต้องมี Rx จากแพทย์): Amoxicillin/clavulanate 500mg q8h หรือ 875mg q12h × 5-7 วัน
 
-RADT RULE (ตาม AAFP 2022 table 2):
-Centor/McIsaac score 2-3 → แนะนำ RADT ก่อนเสมอ
+RADT RULE (ตาม AAFP 2022 table 2) — หลักการสำคัญ:
+Centor 2-3 = UNCERTAIN ZONE:
+  *** ห้ามสรุปว่าไวรัส และห้ามสรุปว่าแบคทีเรีย — ต้องตรวจยืนยัน RADT เท่านั้น ***
   - RADT+ → ให้ ATB (Amoxicillin)
-  - RADT- เด็ก → ทำ Throat culture ก่อนสรุปว่าไม่ใช่ GABHS (ห้ามสรุปเลยว่าไม่ใช่)
+  - RADT- เด็ก → Throat culture ก่อนสรุป (ห้ามบอกว่าไวรัสแน่นอน)
   - RADT- ผู้ใหญ่ → ไม่ให้ ATB
-Centor ≥4 → ATB ทันที ไม่ต้องรอ RADT เด็ดขาด
-  *** ห้ามแนะนำ RADT เมื่อ Centor ≥4 — PPV สูงพอ รักษาได้เลย ***
+  ตัวอย่าง: Centor 3 (ไข้+ไม่ไอ+หนองทอนซิล) แต่ไม่มีต่อมโต → ยังไม่แน่ใจ → RADT
+Centor ≥4 → ATB ทันที ไม่ต้องรอ RADT (PPV สูงพอ)
+Centor ≤1 → viral สูง → supportive care ไม่ต้อง RADT (ยกเว้นมี exposure ชัด)
 
 EBV/MONO DIFFERENTIAL (pharyngitis):
 ถ้าเจ็บคอ + อ่อนเพลียมากผิดปกติ + ต่อมน้ำเหลืองโตหลายที่ หรือตาบวม:
@@ -131,17 +121,46 @@ ALLERGY GATE (semantic — ไม่ใช่ keyword):
 - ถ้ารู้แค่ว่าแพ้ แต่ไม่รู้ชื่อยาหรือไม่รู้อาการ → ถามรายละเอียดก่อน ห้ามแนะนำยาทางเลือกเด็ดขาด
 - ถ้าไม่ได้พูดถึงแพ้ยาเลย → ให้คำแนะนำได้ แล้วถามแพ้ยาก่อนจ่ายจริง
 
-PEN-FAST ALLERGY ASSESSMENT — ถามครบ 4 ข้อเสมอ:
+PEN-FAST ALLERGY ASSESSMENT — ถามครบ 5 ข้อ (เพิ่มจาก 4):
 1. แพ้ยาชื่ออะไร? (ชื่อสามัญ/การค้า/กลุ่มยา)
 2. อาการแพ้เป็นอย่างไร? (ผื่นธรรมดา / ลมพิษ / angioedema / anaphylaxis / SJS)
 3. เกิดขึ้นนานแค่ไหนแล้ว? (≤5 ปี = high risk | >5 ปี = IgE อาจหายแล้ว)
-4. หลังจากนั้นเคยกินยากลุ่มเดิมหรือยาใกล้เคียงอีกไหม แล้วเกิดอะไรขึ้น?
-   (เคยใช้ซ้ำแล้วไม่แพ้ = อาจไม่ใช่ true allergy → cross-check ก่อนสรุป)
+4. รักษาอาการแพ้ด้วยยาอะไร? (antihistamine = non-severe | epinephrine/ICU = severe)
+   *** ข้อนี้บ่งชี้ severity ชัดที่สุด — ถ้า anaphylaxis ต้องรู้ว่า steroid/epinephrine ไหม ***
+5. หลังจากนั้นเคยกินยากลุ่มเดิมหรือยาใกล้เคียงอีกไหม แล้วเกิดอะไรขึ้น?
+   (เคยใช้ซ้ำแล้วไม่แพ้ = อาจไม่ใช่ true allergy)
 
-PRESCRIPTION ETHICS — กฎเหล็ก (ห้ามละเมิดทุกกรณี):
-- เภสัชกรไม่มีอำนาจตัดสินใจเปลี่ยนยาใน Rx แทนแพทย์
-- ให้ข้อมูลทางคลินิกได้ แต่ต้องระบุชัดเสมอว่า "การเปลี่ยนยาต้องผ่านแพทย์ผู้สั่งเท่านั้น"
-- ห้ามพูดว่า "สามารถเปลี่ยนได้" แม้ยาสองตัวจะ equivalent ทางคลินิก
+RX + ALLERGY SAFETY — เภสัชกรต้องตรวจสอบก่อนจ่าย:
+เมื่อมี Rx พร้อมประวัติแพ้ยา:
+  Step 1: ระบุว่ายาใน Rx คือยาอะไร (ชื่อ generic + กลุ่ม)
+  Step 2: ตรวจว่ายานั้น cross-react กับยาที่แพ้ไหม
+  Step 3 (ถ้าตรวจสอบได้):
+    - ถ้าปลอดภัย → จ่ายได้ แนะนำตามปกติ
+    - ถ้าอยู่ในกลุ่มที่แพ้ (เช่น penicillin anaphylaxis + Rx เป็น Augmentin):
+      → แจ้งผู้ป่วยทันทีว่ายานี้อาจเป็นอันตราย
+      → เสนอยาทางเลือกที่ปลอดภัย (เช่น Doxycycline หรือ Levofloxacin สำหรับ ABRS)
+      → แนะนำกลับไปปรึกษาแพทย์เพื่อ Rx ใหม่
+  *** PRESCRIPTION ETHICS ≠ ปล่อยให้ผู้ป่วยได้รับยาที่อันตราย ***
+  *** เภสัชกรมีหน้าที่และสิทธิ์ในการปฏิเสธจ่ายยาที่ไม่ปลอดภัย ***
+
+ABRS + Penicillin anaphylaxis → ยาทางเลือก:
+  ห้ามใช้: amoxicillin, amoxicillin/clavulanate (penicillin group)
+  ระวังใช้: cephalosporin รุ่น 2-3 (cross-reactivity ~2% กับ type 1 hypersensitivity)
+  ใช้ได้ปลอดภัย:
+    - Doxycycline 100 mg BID × 5-7 วัน (first choice)
+    - Levofloxacin 500 mg OD × 5 วัน หรือ Moxifloxacin 400 mg OD × 5 วัน
+    - Cefixime 400 mg/day × 5-7 วัน (second choice ถ้า anaphylaxis นานเกิน 5 ปี)
+
+PRESCRIPTION ETHICS — กฎเหล็ก:
+- เภสัชกรไม่มีอำนาจตัดสินใจเปลี่ยนยาใน Rx โดยพลการ
+- แต่: มีหน้าที่และสิทธิ์ปฏิเสธจ่ายยาที่อาจเป็นอันตรายต่อผู้ป่วย
+- วิธีที่ถูกต้อง: แจ้งเหตุผล + เสนอทางเลือก + แนะนำปรึกษาแพทย์
+- ห้ามพูดว่า "สามารถเปลี่ยนได้" โดยไม่มีเหตุผล safety
+
+SUPPORTIVE CARE ก่อนพบแพทย์ — ต้องให้เสมอ:
+เมื่อแนะนำพบแพทย์ ให้ระบุ supportive care ระหว่างรอเสมอ
+เพราะผู้ป่วยอาจไปไม่ได้ทันที (กลางดึก ไม่มีรถ ฯลฯ)
+ตัวอย่าง: "ระหว่างรอพบแพทย์ แนะนำ Paracetamol ลดไข้ + ล้างจมูกน้ำเกลือ + ดื่มน้ำมากๆ ครับ"
 
 INCOMPLETE INFO:
 - ถามได้สูงสุด 3 รอบ
@@ -159,37 +178,48 @@ COMPLIANCE COUNSELING (เมื่อจ่าย ATB):
 # ─────────────────────────────────────────────────────────────
 
 def classify_prompt(user_message: str, history: list[dict] | None = None) -> str:
-    history_text = _format_history_short(history or [], turns=3)
-    return f"""วิเคราะห์ข้อความและประวัติสนทนาต่อไปนี้ แล้วระบุประเภทคำถาม
+    history_text = _format_history_short(history or [], turns=4)
+    return f"""วิเคราะห์ข้อความและประวัติสนทนา แล้วระบุประเภทคำถาม
 
 ประวัติ (ถ้ามี):
 {history_text}
 
 ข้อความล่าสุด: "{user_message}"
 
-TOPIC SHIFT DETECTION:
-ตรวจสอบว่าข้อความล่าสุดต่อเนื่องจากประวัติ หรือเป็นหัวข้อใหม่?
-- ต่อเนื่อง: ถามรายละเอียดเพิ่มเติมเกี่ยวกับอาการ/ยา/ผู้ป่วยเดิม
-- หัวข้อใหม่: บอกอาการใหม่ที่ไม่เกี่ยวกัน, เปลี่ยนผู้ป่วย, "อีกเรื่องนึง"
-ถ้าเป็นหัวข้อใหม่ → ใส่ "topic_shift": true ใน JSON
+TOPIC SHIFT:
+- topic_shift=true เมื่อ: เปลี่ยนหัวข้อใหม่, เปลี่ยนผู้ป่วย, "อีกเรื่องนึง", "เคสต่อไป"
+- topic_shift=false เมื่อ: ต่อเนื่องจากสนทนาก่อนหน้า แม้จะสั้นหรือ off-topic
 
 intent definitions:
-- symptom       : บอกอาการ / ถามว่าควรใช้ยาอะไรสำหรับอาการนั้น
-- drug_info     : ถามข้อมูลยาโดยตรง (ขนาด, ผลข้างเคียง, interaction, ข้อห้าม)
-- general_pharma: คำถามสุขภาพทั่วไป ไม่ใช่ symptom/drug โดยตรง
-- unknown       : ไม่เกี่ยวข้องกับเภสัช/สุขภาพ
+- symptom     : บอกอาการใหม่ หรือถามยา/การรักษาของอาการ
+- drug_info   : ถามข้อมูลยา (ขนาด, ผลข้างเคียง, interaction, ราคา, ข้อห้าม)
+- followup    : ถามต่อเนื่องจากคำแนะนำในประวัติ เช่น "ต้องบอกหมอว่าอะไร",
+                "โรคนี้ติดต่อได้ไหม", "ยาราคาเท่าไร", "อธิบายเพิ่มได้ไหม"
+- chit_chat   : ทักทาย ขอบคุณ อวยพร แสดงความรู้สึก compliment
+                เช่น "สวัสดี", "ขอบคุณ", "เยี่ยมมาก", "โอเค", "เข้าใจแล้ว"
+- off_topic   : ถามนอกขอบเขตเภสัชกรรม เช่น การเมือง อาหาร กีฬา ข่าว
+- unknown     : ไม่ชัดเจนว่าต้องการอะไร หรืออักขระที่อ่านไม่ได้
+
+กฎ intent priority:
+1. ถ้ามีประวัติการสนทนาและข้อความดูเหมือนตอบรับ/ต่อเนื่อง → ลอง followup ก่อน
+2. ถ้าเป็นคำสั้นๆ เช่น "ขอบคุณ" "โอเค" "ได้เลย" → chit_chat
+3. ถ้าถามเรื่องที่ไม่เกี่ยวสุขภาพเลย → off_topic
+4. ถ้าบอกอาการหรือถามยา → symptom / drug_info
 
 ตัวอย่าง:
-- "ปวดหัวมา 2 วัน มีไข้ด้วย"         → symptom
-- "paracetamol กินกี่เม็ด"            → drug_info
-- "ลูกปวดหู ร้องไห้ มีไข้"            → symptom
-- "เจ็บคอ ขอ amoxicillin"             → symptom
-- "แฟนมีน้ำมูกข้น ขอ Augmentin"      → symptom
-- "สวัสดี"                            → unknown
+- "ปวดหัวมา 2 วัน มีไข้"         → symptom
+- "amoxicillin กินยังไง"           → drug_info
+- "แล้วถ้าไปพบแพทย์ต้องบอกอะไร"   → followup
+- "สวัสดีครับ"                     → chit_chat
+- "ขอบคุณมากนะ"                    → chit_chat
+- "โอเค เข้าใจแล้ว"               → chit_chat
+- "คุณชอบการเมืองไหม"              → off_topic
+- "อาหารอะไรอร่อย"                 → off_topic
+- "ฉันไม่สามารถพิมพ์นอกเรื่องได้"  → chit_chat (user แสดงความรู้สึก)
 
 ตอบด้วย JSON เท่านั้น:
 {{
-  "intent": "<symptom | drug_info | general_pharma | unknown>",
+  "intent": "<symptom | drug_info | followup | chit_chat | off_topic | unknown>",
   "reason": "<อธิบาย 1 ประโยค>",
   "topic_shift": <true | false>
 }}"""
@@ -201,49 +231,70 @@ intent definitions:
 
 def completeness_prompt(user_message: str, history: list[dict]) -> str:
     history_text = _format_history_full(history)
+    # นับรอบ clarify จาก history เพื่อ loop guard
+    bot_turns = sum(1 for h in history if h.get("role") != "user")
+    loop_guard_note = (
+        "\n*** CLARIFY LOOP GUARD: มีการถามไปแล้ว ≥2 รอบ "
+        "→ ถ้า allergy detail มีบางส่วนแล้ว ให้ score ≥ 0.75 และตอบตามที่มี ***\n"
+    ) if bot_turns >= 2 else ""
+
     return f"""ประเมินว่าข้อมูลที่มีอยู่ "เพียงพอที่จะตอบหรือให้คำแนะนำเบื้องต้นได้" หรือไม่
 
 ประวัติการสนทนาทั้งหมด:
 {history_text}
 
 ข้อความล่าสุด: "{user_message}"
+{loop_guard_note}
+════════════════════════════════════════
+FUZZY SEMANTIC PARSING — อ่านก่อนทุกอย่าง
+════════════════════════════════════════
+User มักพิมพ์แบบย่อ ไม่เป็นทางการ หรือตอบหลายข้อรวมกัน
+ให้อนุมาน intent จาก context ของ history ก่อนเสมอ
+
+ตัวอย่างการ parse:
+  "64"          → ถ้าถามอายุไว้ก่อน = อายุ 64 ปี
+  "ใช่"         → ตอบ yes กับคำถามก่อนหน้า
+  "ไม่"         → ตอบ no กับคำถามก่อนหน้า
+  "โดยส่วนใหญ่" → ยืนยันบางส่วน
+  "ผื่นโดยส่วนใหญ่" → อาการแพ้ = ผื่น
+  "ไม่ถึง 6 เดือน" → ถ้าถาม "นานแค่ไหน" = <6 เดือน
+  "มีไอร่วมด้วย ไข้มาบางที ไม่แน่ใจต่อม มีแพ้ amocilin คิดว่านะ"
+    → อายุจาก context ก่อนหน้า + ไอ=true + ไข้=uncertain + ต่อม=uncertain + allergy=amoxicillin(uncertain)
+  "ผื่นโดยส่วนใหญ่ เกิดขึ้นไม่ถึง 6 เดือน และยังไม่เคยได้รับกลุ่มที่คุณว่า (ไม่แน่ใจ)"
+    → allergy symptom = ผื่น ✓ | timeline = <6 เดือน ✓ | rechallenge = ไม่เคย(ไม่แน่ใจ) ✓
+    → PEN-FAST detail ครบพอ → ผ่าน STEP 0
+
+กฎหลัก: ถ้าสามารถ infer ได้จาก context → ถือว่า answered แม้ไม่พิมพ์ชัด
 
 ════════════════════════════════════════════════════════
 STEP 0 — ALLERGY COMPLETENESS CHECK (ตรวจก่อนทุกกฎ)
 ════════════════════════════════════════════════════════
-ประเมินเชิง semantic — ไม่ตรง keyword แต่ดูความหมาย
+ประเมินเชิง semantic — รับ fuzzy/casual input ได้
 
 มีการพูดถึงประวัติแพ้ยาในข้อความหรือ history ไหม?
   [ไม่มี]  → ข้ามไป STEP 1 ได้เลย
   [มี]     → ตรวจต่อว่า "detail ครบ" หรือไม่:
 
-  DETAIL ครบ (score ไม่ถูก block) เมื่อรู้ทั้ง 2 อย่าง:
-    A) กลุ่ม/ชื่อยาที่แพ้  — เช่น penicillin, amoxicillin, ยาฆ่าเชื้อกลุ่มเพนิซิลลิน,
-       ยากลุ่มเบต้าแลคแตม, "pen", "amox", sulfa, cephalosporin ฯลฯ
-       (รับ slang / ชื่อย่อ / ภาษาพูดได้ทั้งหมด)
-    B) ระดับความรุนแรง — เช่น ผื่น, ลมพิษ, บวม, หน้าบวม, หายใจลำบาก,
-       ช็อก, anaphylaxis, ต้องฉีดยา, รุนแรง, แค่คัน, ผื่นแดงเล็กน้อย ฯลฯ
-       (รับภาษาพูด / คำอธิบาย ไม่ต้องใช้ศัพท์แพทย์)
+  DETAIL ครบ เมื่อรู้ทั้ง 2 อย่าง (รับ fuzzy/uncertain):
+    A) กลุ่ม/ชื่อยาที่แพ้ — รับ slang/ย่อ/สะกดผิด:
+       "amocilin" = amoxicillin ✓ | "pen" = penicillin ✓ | "ยาฆ่าเชื้อ" = ✓
+    B) ระดับความรุนแรง — รับ description/casual:
+       "ผื่น", "คัน", "บวม", "หายใจไม่ออก", "แบบเดียวกัน", "ผื่นโดยส่วนใหญ่" ✓
 
-  DETAIL ไม่ครบ → score = 0.15, domain = allergy, STOP (ห้ามผ่านไป recommend)
-  กรณีที่ต้องถาม (ห้ามกระโดดไปแนะนำยาทางเลือกเด็ดขาด):
-    - รู้แค่ว่าแพ้ แต่ไม่รู้ชื่อ/กลุ่มยา
-    - รู้แค่ว่าแพ้ยาชื่อนี้ แต่ไม่รู้อาการแพ้เลย
-    - ไม่แน่ใจว่าแพ้ยาอะไร
-    - "แพ้ยาบางตัว" / "มีประวัติแพ้ยา" โดยไม่ระบุรายละเอียด
-    - "แพ้ยาปฏิชีวนะ" โดยไม่บอกชื่อยาหรืออาการ
+  DETAIL ไม่ครบ → score = 0.15, domain = allergy, STOP:
+    - รู้แค่ว่าแพ้ แต่ไม่รู้ชื่อ/กลุ่มยาเลย
+    - รู้ชื่อยา แต่ไม่รู้อาการแพ้เลย (ไม่ใช่ uncertain — คือไม่ได้บอกเลย)
 
   ตัวอย่าง DETAIL ครบ → ผ่าน:
-    "แพ้ penicillin รุนแรง (anaphylaxis)"        → ครบ  ✓
-    "แพ้ amox อาการผื่นขึ้นทั้งตัว"              → ครบ  ✓
-    "แพ้ยากลุ่ม pen แค่คันๆ"                    → ครบ  ✓
-    "แพ้ยาฆ่าเชื้อ ตัวบวม หายใจไม่ออก"          → ครบ  ✓
+    "แพ้ penicillin รุนแรง (anaphylaxis)"       → ครบ ✓
+    "แพ้ amoxicillin ผื่นขึ้น"                 → ครบ ✓
+    "amocilin คิดว่านะ" + "ผื่นโดยส่วนใหญ่"    → ครบ ✓ (fuzzy parse)
+    "แพ้ยาฆ่าเชื้อ ตัวบวม"                     → ครบ ✓
+    "ผื่นโดยส่วนใหญ่ ไม่ถึง 6 เดือน"           → ครบ ✓ (ถ้ามีชื่อยาจาก history)
 
-  ตัวอย่าง DETAIL ไม่ครบ → BLOCK ห้ามแนะนำยาทางเลือก:
-    "แพ้ยาอยู่"                                  → ไม่ครบ  ✗
-    "เคยแพ้ยาปฏิชีวนะ ไม่แน่ใจว่าตัวไหน"        → ไม่ครบ  ✗
-    "มีประวัติแพ้ยา"                              → ไม่ครบ  ✗
-    "แพ้ amoxicillin" (ไม่บอกอาการเลย)           → ไม่ครบ  ✗
+  ตัวอย่าง DETAIL ไม่ครบ → BLOCK:
+    "แพ้ยาอยู่" (ไม่บอกชื่อและอาการ)           → ไม่ครบ ✗
+    "มีประวัติแพ้ยา" (ไม่บอกอะไรเพิ่ม)         → ไม่ครบ ✗
 
 ════ STEP 1 — ANSWER-FIRST PRINCIPLE ════
 
@@ -251,11 +302,14 @@ STEP 0 — ALLERGY COMPLETENESS CHECK (ตรวจก่อนทุกกฎ)
 น้ำหนักตัวเพียงอย่างเดียว ≠ เหตุผลที่ไม่ตอบ (ตอบ + ถามน้ำหนักเพิ่มได้)
 
 VAGUE-INPUT RULE:
-ถ้า input ไม่ระบุอาการหลัก เช่น "ลูกไม่สบาย" "มีไข้" โดยไม่รู้โรค domain → score ≤ 0.20
-ต้องรู้อย่างน้อย: อายุ + อาการหลัก (ปวดหู/เจ็บคอ/คัดจมูก/ไอ) + ไข้กี่องศา
+ถ้า input ไม่ระบุอาการหลัก เช่น "ลูกไม่สบาย" โดยไม่รู้ domain → score ≤ 0.20
 
-CENTOR-INCOMPLETE RULE:
-ถ้าเจ็บคอแต่ไม่รู้ ไอ+ไข้+อายุ → ต้องถามก่อน ห้ามสรุปก่อน
+CENTOR-INCOMPLETE RULE — หลักการสำคัญ:
+Pharyngitis ต้องรู้ Centor criteria ครบก่อนตัดสิน:
+  ต้องรู้ทั้ง 5 อย่าง: อายุ + ไอ/ไม่ไอ + ไข้/ไม่ไข้ + ต่อมน้ำเหลือง + หนองทอนซิล
+  *** ถ้าขาดอย่างใดอย่างหนึ่ง → ต้องถามก่อน ห้ามตัดสินใจ ***
+  เหตุผล: แต่ละ criterion เปลี่ยน score ±1 → เปลี่ยน decision (RADT vs ATB vs watchful)
+  ตัวอย่าง: เห็นหนองทอนซิล+ไข้ แต่ไม่รู้อายุและไม่รู้ว่ามีไอ → ยังไม่พอ → ถามก่อน
 
 ════ Score สูง ≥ 0.85 ════
 
@@ -265,39 +319,40 @@ CENTOR-INCOMPLETE RULE:
 - อาการ + อายุ + น้ำหนัก + ไม่แพ้ยา/ไม่ได้พูดถึงแพ้ยา → 0.90
 - Red Flag ชัด → 0.95 (ตอบทันที)
 - ขอ ATB แต่อาการชัดว่าไม่ถึงเกณฑ์ → 0.90 (negative case ตอบทันที)
-- เด็ก <3 ปี + ไอ + น้ำมูก + ท้องเสีย (viral ชัด) → 0.95 (negative case ตอบทันที)
-- Centor ≥4 ชัดเจน (ไม่ไอ + ไข้ + ต่อมโต + หนองทอนซิล + อายุ 3-14) → 0.95 (ATB ทันที ไม่ต้อง RADT)
+- เด็ก <3 ปี + ไอ + น้ำมูก + ท้องเสีย (viral ชัด) → 0.95
+- Centor ≥4 ชัดเจน → 0.95 (ATB ทันที)
 - Treatment failure: รู้ยาที่ได้ + ไม่ดีขึ้น + อายุ/น้ำหนัก → 0.90
-- Prescription + allergy detail ครบ (ผ่าน STEP 0) → 0.90
-- AOM + แพ้ penicillin ชัดเจน (ชื่อยา + อาการแพ้ระบุแล้ว) + อายุ + น้ำหนัก → 0.92 (ตอบทันที ไม่ถามซ้ำ)
+- Prescription + allergy detail ครบ → 0.90
+- AOM + แพ้ penicillin ชัดเจน + อายุ + น้ำหนัก → 0.92
 - OME (ไม่ปวด ไม่ไข้ น้ำขังหู) → 0.95
-- Laryngitis/เสียงแหบ: viral ชัด → 0.90
-- Watchful waiting: AOM >2 ปี unilateral เบา → 0.90
-- AOM + prev amox ใน 3 เดือน (90 วัน) + อายุ + น้ำหนัก + ไม่แพ้ยา → 0.95 (ใช้ high-dose 80-90 mg/kg ทันที)
-- Sinusitis ABRS ชัด: duration ≥10 วัน หรือ double sickening + อาการชัด → 0.90 (ตอบทันที ไม่ต้องถามเพิ่ม)
-- ขอเปลี่ยนยาจาก Rx (Prescription ethics case) → 0.95 (ตอบทันทีว่าต้องผ่านแพทย์)
+- Sinusitis ABRS ชัด: duration ≥10 วัน หรือ double sickening → 0.90
 
 [กฎ B — Pharyngitis/Centor]
-- มี ไอ/ไม่ไอ + ไข้/ไม่ไข้ + อายุ → 0.80
-- Centor ≤1 ชัดเจน → 0.90
-- Centor 4-5 ชัดเจน + อายุ + น้ำหนัก → 0.95 (ATB ทันที)
+- รู้ครบทุก Centor criteria (อายุ+ไอ+ไข้+ต่อม+หนองทอนซิล) → ประเมิน score แล้วตัดสิน:
+    Centor ≥4 → 0.95 | Centor 2-3 → 0.80 (RADT) | Centor ≤1 → 0.90 (viral/watchful)
+- รู้แค่บางส่วน (เช่น เห็นหนองแต่ไม่รู้อายุ/ไอ) → score ≤ 0.50 → ต้องถาม
 
 ════ Score ต่ำ — ต้องถามก่อน ════
 
 [กฎ C]
 - AOM: ขาดอายุ → 0.25 | มีแค่ "ลูกปวดหู" → 0.20
-- Pharyngitis: ขาดทั้ง ไอ+ไข้+อายุ → 0.25
+- Pharyngitis: ขาดอายุ OR ขาดไอ/ไม่ไอ → ≤ 0.50 (ไม่สามารถคำนวณ Centor ได้)
 - Sinusitis: ขาด duration → 0.30
 
-[กฎ D — ห้ามถามซ้ำ]
-ถ้า input หรือ history มีข้อมูลนั้นอยู่แล้ว → อย่านับว่า "ขาด"
+[กฎ D — ห้ามถามซ้ำ (STRICT)]
+ถ้า input หรือ history มีข้อมูลนั้นอยู่แล้ว → อย่านับว่า "ขาด" เด็ดขาด
+
+PARTIAL / UNCERTAIN ANSWER RULE:
+คำตอบแบบ fuzzy/uncertain = answered แล้ว:
+  "ไม่แน่ใจ" / "น่าจะ" / "คิดว่า" / "บางที" / "โดยส่วนใหญ่" / ตอบสั้นๆ ใน context
+  → ถือว่า answered → ห้ามถามซ้ำ → ใส่ใน already_have พร้อมบันทึก uncertainty
 
 ตอบด้วย JSON เท่านั้น:
 {{
   "score": <0.0–1.0>,
   "domain": "<AOM | pharyngitis | sinusitis | allergy | general>",
-  "missing": ["<เฉพาะที่ขาดจริงและมีผลต่อการตัดสินใจ>"],
-  "already_have": ["<ข้อมูลที่มีแล้วใน input/history>"]
+  "missing": ["<เฉพาะที่ไม่ได้บอกเลย ไม่รวม uncertain/partial answers>"],
+  "already_have": ["<ข้อมูลที่มีแล้ว รวม uncertain เช่น 'ต่อมน้ำเหลือง (ไม่แน่ใจ)' 'allergy: amoxicillin (fuzzy)'>"]
 }}"""
 
 
@@ -349,11 +404,13 @@ Strategy Sinusitis/ABRS:
   รอบ 3 — ถามแพ้ยา: แพ้ยา penicillin หรือ Augmentin ไหม ถ้าแพ้อาการเป็นอย่างไร""",
 
         "allergy": """
-Strategy Drug Allergy (PEN-FAST) — ถามครบ 4 ข้อนี้พร้อมกันในรอบแรก:
+Strategy Drug Allergy (PEN-FAST) — ถามครบ 5 ข้อพร้อมกันในรอบแรก:
   - แพ้ยาชื่ออะไร (ชื่อการค้าหรือชื่อสามัญก็ได้)
   - อาการแพ้เป็นอย่างไร (ผื่น / ลมพิษ / หน้าบวม / หายใจลำบาก / ช็อก / SJS)
     *** ความรุนแรงต่างกัน → แนวทางยาทางเลือกต่างกัน ***
   - เกิดขึ้นนานแค่ไหนแล้ว (≤5 ปี = high risk | >5 ปี = IgE อาจหายแล้ว)
+  - รักษาอาการแพ้ด้วยยาอะไร? (antihistamine = mild | epinephrine/admit = severe)
+    *** ข้อนี้บ่งชี้ severity ชัดที่สุด — ถามทุกครั้งที่มี allergy ***
   - หลังจากนั้นเคยกินยากลุ่มเดิมหรือยาใกล้เคียงอีกไหม เกิดอะไรขึ้น
     (ถ้าเคยใช้ซ้ำแล้วไม่แพ้ = อาจไม่ใช่ true allergy)""",
     }.get(domain, "")
@@ -371,24 +428,34 @@ Strategy Drug Allergy (PEN-FAST) — ถามครบ 4 ข้อนี้พ�
 {history_text}
 
 Domain: {domain}
-มีแล้ว: {have_text}
+มีแล้ว (ห้ามถามซ้ำทุกกรณี): {have_text}
 ยังขาด: {missing_text}
 {domain_guide}
 {first_round_note}
 {last_note}
 
-FORMAT — สำคัญมาก:
-- ถ้ามีหลายข้อที่ต้องถาม → เริ่มด้วยประโยคนำ 1 ประโยค แล้วแจกแจงเป็น bullet (-)
-  ตัวอย่าง:
-    เพื่อประเมินอาการให้แม่นยำ รบกวนสอบถามเพิ่มเติมครับ:
-    - น้องอายุเท่าไหร่ และน้ำหนักกี่กิโลกรัมครับ?
-    - มีไข้ไหม ถ้ามีวัดได้กี่องศาครับ?
-    - มีประวัติแพ้ยา penicillin ไหมครับ?
+NO-REPEAT RULE (สำคัญที่สุด):
+ตรวจสอบ "มีแล้ว" ด้านบนทุกครั้ง ก่อน generate คำถาม
+ห้ามถามสิ่งที่อยู่ใน "มีแล้ว" เด็ดขาด แม้คำตอบจะ fuzzy/uncertain
+ถามเฉพาะ field ที่อยู่ใน "ยังขาด" เท่านั้น
+
+UNCERTAIN ACKNOWLEDGMENT RULE:
+ถ้า user ตอบมาแต่ไม่ชัด ให้ acknowledge ก่อนแล้วค่อยถามที่ยังขาดจริงๆ
+เช่น "ขอบคุณที่แจ้งนะครับ จากที่เล่ามา [สรุปสิ่งที่เข้าใจ] — ขอถามเพิ่มเติมอีกข้อเรื่อง [ที่ยังขาดจริง]"
+ห้ามถามรายการเดิมซ้ำทั้งหมด
+
+CLARIFY LOOP ESCAPE:
+ถ้า "ยังขาด" ว่างเปล่า (missing_text = ว่าง หรือ "ไม่มี") → ห้ามถาม → บอกว่าได้ข้อมูลพอแล้ว
+
+FORMAT:
+- ถ้ามีหลายข้อ → ประโยคนำ 1 ประโยค แล้วแจกแจงเป็น bullet (-)
 - ถ้าถามแค่ 1 ข้อ → ประโยคเดียว ไม่ต้อง bullet
+- ถ้า missing ว่างแต่ถูก force generate → ตอบว่า "ได้รับข้อมูลครบแล้วครับ กำลังประเมินอาการ"
 - ใช้ dash (-) เท่านั้น ห้ามใช้ตัวเลข 1. 2. 3.
 - ห้าม emoji ห้าม **bold**
 - ภาษาเป็นมิตร เหมือนเภสัชกรที่ร้านยา
-- ห้ามถามซ้ำสิ่งที่ตอบแล้วในประวัติ
+- ความหลากหลายในภาษา: ไม่ขึ้นต้นด้วย "เพื่อประเมินอาการ รบกวน..." ทุกครั้ง
+  สลับบ้าง เช่น "ขอบคุณที่แจ้งนะครับ..." / "ได้รับข้อมูลแล้วครับ ขอถามเพิ่มเติม..." / "เข้าใจแล้วครับ..."
 
 ตอบเฉพาะคำถาม ไม่ต้องมีคำอธิบาย"""
 
@@ -458,39 +525,51 @@ Pharyngitis (Modified Centor/McIsaac):
   → ATB ทันที ห้ามแนะนำ RADT (PPV >50%) | จ่าย Amoxicillin ตาม dose
   ตัวอย่าง: ไม่ไอ+ไข้+ต่อมโต+หนองทอนซิล+อายุ 3-14 = score 5 → ATB ทันที
 
-  CENTOR 2-3 RULE:
-  → RADT ก่อน | RADT+ → ATB | RADT- เด็ก → Throat culture (ห้ามสรุปว่าไม่ใช่ GABHS โดยไม่มี culture)
+  CENTOR 2-3 RULE — UNCERTAIN ZONE:
+  *** ห้ามสรุปว่าไวรัส และห้ามสรุปว่าแบคทีเรีย — ต้อง RADT เท่านั้น ***
+  เหตุผล: score 2-3 มี PPV ประมาณ 25-50% ไม่แน่ใจพอที่จะตัดสิน
+  → แนะนำ RADT: ถ้า RADT+ → ATB | RADT- เด็ก → Throat culture | RADT- ผู้ใหญ่ → watchful
+  *** ห้ามบอกว่า "น่าจะเป็นไวรัส" หรือ "ไม่ต้องใช้ยาปฏิชีวนะ" โดยไม่มี RADT ***
 
-  GABHS DOSE (สำคัญ — ใช้ mg/kg สำหรับเด็กเสมอ):
-  เด็ก: Amoxicillin 50 mg/kg/วัน (max 1,000 mg/วัน) แบ่ง 1-2 ครั้ง × 10 วัน
-  *** ห้ามใช้ adult dose 500mg TID กับเด็ก แม้จะอายุ 10 ปีก็ตาม ***
-  ตัวอย่าง: 10 ปี ~30 kg → 50×30 = 1,500 → cap ที่ 1,000 mg → 500mg BID
+  CENTOR ≤1 RULE:
+  → viral สูง → supportive care ไม่ต้อง RADT (ยกเว้นมี exposure ชัด)
+
+  GABHS DOSE:
+  เด็ก: Amoxicillin 50 mg/kg/วัน (max 1,000 mg/วัน) × 10 วัน
   ผู้ใหญ่: 500 mg TID หรือ 875 mg BID × 10 วัน
 
   EBV/MONO DIFFERENTIAL:
-  ถ้า: เจ็บคอ + อ่อนเพลียมากผิดปกติ + ต่อมน้ำเหลืองโตหลายที่ หรือ ม้ามโต หรือตาบวม
-  → สงสัย EBV Infectious Mononucleosis ไม่ใช่ GABHS
-  → ห้ามให้ Amoxicillin/Ampicillin → เกิดผื่น maculopapular ได้สูง (80%)
-  → แนะนำ: supportive care + พบแพทย์เพื่อ Monospot test
-  → needs_pushback = true ถ้า request ATB
+  ถ้า: เจ็บคอ + อ่อนเพลียมาก + ต่อมโตหลายที่ หรือตาบวม → สงสัย EBV
+  → ห้ามให้ Amoxicillin/Ampicillin → พบแพทย์ Monospot test
 
   VIRAL PHARYNGITIS CLEAR RULE (เด็ก <3 ปี + ไอ + น้ำมูก + ท้องเสีย):
   → viral ชัดเจน → needs_pushback=true, ห้าม RADT, ห้าม ATB
 
 Sinusitis/ABRS:
   SEVERITY-FIRST RULE:
-  - Double sickening (หวัดดีแล้วกลับแย่) → ABRS ชัด → แนะนำพบแพทย์รับ Rx
-    *** ไม่ใช่จ่ายยาเอง เพราะต้องตรวจยืนยันและ Rx จากแพทย์ ***
-    → ให้ข้อมูล: "แพทย์น่าจะพิจารณา Amoxicillin/clavulanate 500mg q8h หรือ 875mg q12h × 5-7 วัน"
-    → ระหว่างรอ: Paracetamol + น้ำเกลือล้างจมูก + ดื่มน้ำมาก
-  - Duration ≥10 วันไม่ดีขึ้น (persistent ABRS) → เช่นเดียวกัน → พบแพทย์
+  - Double sickening / persistent ≥10 วัน → แนะนำพบแพทย์รับ Rx
+    → ให้ข้อมูล: "แพทย์น่าจะพิจารณา Amoxicillin/clavulanate 500mg q8h × 5-7 วัน"
+    → ระหว่างรอ (SUPPORTIVE CARE): Paracetamol + น้ำเกลือล้างจมูก + ดื่มน้ำมาก
   - Viral rhinosinusitis <10 วัน → supportive care, ไม่ให้ ATB
 
 STEP 3 — ALLERGY ASSESSMENT (semantic):
-ประเมินว่าทราบ allergy detail ครบไหม (กลุ่มยา + ระดับอาการ)
-ถ้าครบ → ระบุ first-line และ alternative ตาม allergy type
+ประเมินว่าทราบ allergy detail ครบไหม
+
+RX + ALLERGY SAFETY CHECK (ทำก่อน allergy_detail_incomplete check):
+ถ้ามี Rx พร้อมประวัติแพ้ยา:
+  1. ระบุว่ายาใน Rx เป็นกลุ่มอะไร
+  2. ตรวจว่า cross-react กับยาที่แพ้ไหม
+  3. ถ้า Rx เป็นยาในกลุ่มที่แพ้รุนแรง (เช่น penicillin anaphylaxis + Rx เป็น Augmentin):
+     → needs_rx_safety_alert = true
+     → ระบุ: rx_safety_reason = "[ชื่อยาใน Rx] อยู่ในกลุ่ม [กลุ่มยา] ซึ่งผู้ป่วยมีประวัติแพ้รุนแรง"
+     → เสนอยาทางเลือกที่ปลอดภัย
+  ABRS + penicillin anaphylaxis alternatives:
+    - First choice: Doxycycline 100 mg BID × 5-7 วัน
+    - Second choice: Levofloxacin 500 mg OD × 5 วัน หรือ Moxifloxacin 400 mg OD × 5 วัน
+
+ALLERGY DETAIL CHECK (ทำหลัง Rx safety):
+ถ้าครบ → ระบุ first-line และ alternative ตาม allergy type + severity
 ถ้าไม่ครบ → knowledge_gaps = ["allergy details"] และ allergy_detail_incomplete = true
-  *** ถ้า allergy_detail_incomplete=true → recommendation node ห้ามแนะนำยาทางเลือกใดๆ ***
 
 STEP 4 — COMPLIANCE / ADHERENCE:
 ATB ครบ course, ท้องเสีย probiotic
@@ -639,35 +718,50 @@ def recommendation_prompt(
    ห้ามใช้ backslash นอก escape sequence จำเป็น
 4. SEVERITY-FIRST: เมื่ออาการต้องการ Rx จากแพทย์ (ABRS double sickening, treatment failure)
    → แนะนำพบแพทย์ก่อน + บอกว่า "แพทย์น่าจะพิจารณา [ยา X]" เพื่อ informed decision
-   → ให้ supportive care ระหว่างรอ
-   *** ห้ามสั่งจ่าย ATB สำหรับ ABRS เองโดยไม่มี Rx ***
-5. CENTOR ≥4: ATB ทันที ห้าม recommend RADT ห้าม hedge
-6. GABHS DOSE — ใช้ mg/kg เสมอสำหรับเด็ก:
+   → ให้ supportive care ระหว่างรอ *** ต้องให้เสมอ — ผู้ป่วยอาจไปไม่ได้ทันที ***
+5. CENTOR 2-3 = UNCERTAIN → บอก RADT เท่านั้น ห้ามสรุปว่าไวรัสหรือแบคทีเรีย
+   ตัวอย่างที่ถูก: "จากอาการที่ประเมินได้ ยังไม่แน่ใจว่าเกิดจากเชื้อไวรัสหรือแบคทีเรีย
+   แนะนำตรวจด้วยชุดทดสอบ RADT ก่อน เพื่อให้ได้ผลแม่นยำและเลือกการรักษาได้ถูกต้องครับ"
+5b. CENTOR ≥4: ATB ทันที ห้าม recommend RADT ห้าม hedge
+6. RX + ALLERGY SAFETY:
+   ถ้า Rx เป็นยาในกลุ่มที่ผู้ป่วยแพ้รุนแรง:
+   → แจ้งทันทีว่ายานี้อาจอันตราย
+   → เสนอยาทางเลือกที่ปลอดภัย พร้อมขนาดยา
+   → แนะนำกลับพบแพทย์เพื่อ Rx ใหม่
+   *** เภสัชกรมีหน้าที่ปกป้องผู้ป่วยจากยาที่อาจอันตราย ***
+   ABRS + penicillin anaphylaxis: Doxycycline 100 mg BID × 5-7 วัน (first choice)
+7. GABHS DOSE — ใช้ mg/kg เสมอสำหรับเด็ก:
    เด็ก: 50 mg/kg/วัน (max 1,000 mg) × 10 วัน *** ห้ามใช้ adult dose ***
-   ถ้าไม่รู้น้ำหนัก: ประมาณตามอายุ และ cap ที่ max dose
-   ตัวอย่าง 10 ปี ~30 kg → 1,500 mg → cap 1,000 mg → 500mg BID
-7. EBV WARNING: ถ้าสงสัย EBV (อ่อนเพลียมาก + ต่อมโตหลายที่)
-   → ห้ามแนะนำ Amoxicillin → แนะนำพบแพทย์เพื่อ Monospot test
-8. ALLERGY INCOMPLETE (allergy_detail_incomplete=true):
-   ถามรายละเอียดก่อน: ชื่อยา + อาการ + นานแค่ไหน + เคยใช้ซ้ำไหม
+8. EBV WARNING: ถ้าสงสัย EBV → ห้ามแนะนำ Amoxicillin → แนะนำพบแพทย์
+9. ALLERGY INCOMPLETE: ถามรายละเอียดก่อน (PEN-FAST 5 ข้อ)
    *** ห้ามส่งกลับแพทย์ทันทีโดยไม่ถามก่อน ***
-9. RADT- เด็ก: ต้องระบุ "ถ้า RADT- ควรทำ Throat culture ยืนยัน ก่อนสรุปว่าไม่ใช่ GABHS"
-10. TREATMENT FAILURE: ให้ clinical direction ก่อนแนะนำพบแพทย์
-    "อาการบ่งชี้ว่าอาจต้องปรับยา แพทย์น่าจะพิจารณา [ยา] แนะนำพาพบแพทย์เพื่อตรวจและปรับยาครับ"
-11. COMPLIANCE COUNSELING เมื่อจ่าย ATB: อธิบายเหตุผลกินให้ครบ
-   1) ป้องกัน Rheumatic fever  2) ป้องกัน antibiotic resistance  3) ลด recurrence
-   แก้ท้องเสีย: probiotic / yogurt live culture หรือกินยาหลังอาหาร
-   1) ป้องกัน Rheumatic fever  2) ป้องกัน antibiotic resistance  3) ลด recurrence
-   แก้ท้องเสีย: probiotic / yogurt live culture หรือกินยาหลังอาหาร
-8. DOSE COMPLETENESS: ระบุครบ ชื่อยา + ขนาด mg + ความถี่ + ระยะเวลา
-9. RADT: Centor 2-3 → บอกว่า "ถ้า RADT+ ให้ Amoxicillin [ขนาด] × 10 วัน"
-10. OME: สังเกต 3 เดือน → ENT → PE tube ถ้าไม่ดีขึ้น
-11. WATCHFUL WAITING: ยาแก้ปวด + กลับมาใน 48-72h + *** ถามผู้ปกครองก่อนว่าพร้อมไหม ***
-12. HONEY: ถ้าแนะนำน้ำผึ้ง ต้องระบุ "สำหรับเด็กอายุ >1 ปีเท่านั้น"
-13. DISCLAIMER: ท้ายคำตอบเสมอ "ทั้งนี้ หากอาการไม่ดีขึ้น ควรพบแพทย์โดยตรงครับ"
-14. FORMAT: ไม่เกิน 290 คำ, UNDERLINE __ชื่อยา__ เฉพาะในส่วน "ยาที่แนะนำ"
+10. SUPPORTIVE CARE ทุกเคสที่พบแพทย์:
+    ต้องให้ supportive care ระหว่างรอเสมอ
+    ตัวอย่าง: "ระหว่างรอพบแพทย์ แนะนำ Paracetamol ลดไข้ + ดื่มน้ำมากๆ + พักผ่อนครับ"
+11. RADT- เด็ก: "ถ้า RADT- ควรทำ Throat culture ยืนยันก่อนสรุป"
+12. TREATMENT FAILURE: ให้ clinical direction ก่อนแนะนำพบแพทย์
+13. COMPLIANCE COUNSELING เมื่อจ่าย ATB:
+    1) ป้องกัน Rheumatic fever  2) ป้องกัน antibiotic resistance  3) ลด recurrence
+    แก้ท้องเสีย: probiotic / yogurt live culture หรือกินยาหลังอาหาร
+14. DOSE COMPLETENESS: ระบุครบ ชื่อยา + ขนาด mg + ความถี่ + ระยะเวลา
+15. OME: สังเกต 3 เดือน → ENT → PE tube ถ้าไม่ดีขึ้น
+16. WATCHFUL WAITING: ยาแก้ปวด + กลับมาใน 48-72h + *** ถามผู้ปกครองก่อนว่าพร้อมไหม ***
+17. HONEY: ถ้าแนะนำน้ำผึ้ง ต้องระบุ "สำหรับเด็กอายุ >1 ปีเท่านั้น"
+18. DISCLAIMER: ท้ายคำตอบเสมอ "ทั้งนี้ หากอาการไม่ดีขึ้น ควรพบแพทย์โดยตรงครับ"
 
-โครงสร้าง (ห้าม emoji ห้าม [N]):
+RESPONSE FORMAT — เลือกตาม response_mode:
+  ถ้า symptom_summary มี "[MODE:FOLLOWUP]" หรือ "[MODE:CONVERSATIONAL]":
+    → ตอบแบบสนทนาธรรมชาติ ไม่ต้องใช้ template 4-section
+    → อธิบายตรงประเด็นที่ถาม โดยอ้างอิง context จากประวัติ
+    → ไม่เกิน 150 คำ ห้าม emoji ห้าม [N]
+    → ไม่ต้องมี ## sections
+    → ตอบใน recommendation field เป็น plain text
+
+  ถ้าปกติ (clinical recommendation):
+    → ใช้โครงสร้าง 4-section ด้านล่าง ไม่เกิน 290 คำ
+    → UNDERLINE __ชื่อยา__ เฉพาะในส่วน "ยาที่แนะนำ"
+
+โครงสร้าง clinical (ห้าม emoji ห้าม [N]):
 ## สรุปสถานการณ์
 [1-2 ประโยค เขียนในมุมมองที่เข้าใจง่าย ไม่ใช้ศัพท์เทคนิค]
 
@@ -684,13 +778,88 @@ def recommendation_prompt(
 
 ตอบด้วย JSON เท่านั้น:
 {{
-  "recommendation": "<คำแนะนำฉบับเต็ม - markdown ตามโครงสร้าง ห้าม emoji ห้าม [N] - underline เฉพาะชื่อยา>",
+  "recommendation": "<คำแนะนำ — clinical ใช้ markdown 4-section, followup ใช้ plain text สั้น>",
   "first_line_drug": "<ชื่อยาหลัก หรือ null>",
   "alternatives": ["<ยาทางเลือก>"],
   "when_to_see_doctor": "<เงื่อนไขพบแพทย์>",
   "sources": [],
   "pushback_message": "<ข้อความปฏิเสธถ้าเป็น negative case หรือ null>",
   "augmented_notes": "<ข้อมูลเสริม หรือ null>"
+}}"""
+
+
+
+# ─────────────────────────────────────────────────────────────
+#  followup_prompt  (v14 — ใหม่)
+# ─────────────────────────────────────────────────────────────
+
+def followup_prompt(user_message: str, history: list[dict]) -> str:
+    """
+    สำหรับ intent followup/chit_chat/off_topic/unknown/diagnosis_explain
+    ตอบแบบ conversational อ้างอิง context จาก history
+    """
+    history_text = _format_history_full(history, max_turns=10)
+    return f"""คุณเป็นเภสัชกรผู้เชี่ยวชาญ กำลังคุยกับผู้ป่วย/ผู้ใช้
+
+ประวัติการสนทนา:
+{history_text}
+
+ข้อความล่าสุด: "{user_message}"
+
+วิธีตอบตาม intent:
+
+[DIAGNOSIS_EXPLAIN — user ถามขอดู flow การวินิจฉัย]
+สัญญาณ: "ทำไมถึงวินิจฉัยว่า...", "อธิบาย flow", "มีโอกาสเป็นโรคนี้เพราะ...", "แนวคิดการวินิจฉัย"
+วิธีตอบ:
+- เขียน flow อธิบาย reasoning เป็นขั้นตอน อ่านง่าย เป็นธรรมชาติ
+- อ้างอิงอาการจาก history ของผู้ป่วย
+- ตัวอย่างโครงสร้าง (ปรับตาม case จริง ไม่ต้องเอาแบบนี้ตายตัว):
+  "จากอาการที่เล่ามา [สรุปอาการ] ผมวิเคราะห์ดังนี้ครับ
+  1. [สัญญาณสำคัญแรก] ซึ่งตรงกับ [โรค/ภาวะ]
+  2. [สัญญาณที่สอง] เสริมให้ความเป็นไปได้มากขึ้น
+  3. [ปัจจัยอื่น] เช่น อายุ ประวัติ ฯลฯ
+  รวมกันแล้ว โอกาสที่จะเป็น [โรค] ค่อนข้างสูงครับ"
+- ไม่เกิน 200 คำ ห้าม emoji
+- ใส่ response_type = "diagnosis_explain" ใน JSON
+
+[FOLLOWUP — ถามต่อเนื่องจาก context เดิม]
+- ตอบตรงประเด็นที่ถาม อ้างอิง context จากประวัติ
+- ถ้าอยู่ในขอบเขตเภสัช อนุมานได้ ระบุ (อนุมานตามหลักเภสัชกรรม) ถ้าไม่มี guideline
+- ถ้าถามเรื่องพบแพทย์ แนะนำว่าควรแจ้งอะไร
+- ใส่ response_type = "conversational"
+
+[CHIT_CHAT — ทักทาย ขอบคุณ แสดงความรู้สึก]
+- ตอบรับอบอุ่น เป็นมิตร เป็นธรรมชาติ
+- redirect กลับเรื่องสุขภาพ/เภสัชอย่างเป็นธรรมชาติ ถ้าทำได้
+- ตย. ขอบคุณ: "ด้วยความยินดีครับ หวังว่าอาการจะดีขึ้นเร็วๆ นะครับ มีข้อสงสัยถามได้เสมอครับ"
+- ตย. สวัสดี: "สวัสดีครับ มีเรื่องสุขภาพหรืออาการอยากปรึกษาไหมครับ?"
+- ตย. โอเค / เข้าใจแล้ว: "ดีเลยครับ มีคำถามเพิ่มเติมยินดีช่วยเสมอครับ"
+- ใส่ response_type = "conversational"
+
+[OFF_TOPIC — ถามนอกขอบเขตเภสัชกรรม]
+- ตอบสั้นๆ สุภาพ redirect กลับเภสัชกรรม
+- ตย. สนใจการเมืองไหม: "ผมเป็นผู้ช่วยด้านเภสัชกรรมครับ ไม่ถนัดด้านนั้น แต่ถ้ามีเรื่องยาหรืออาการยินดีช่วยครับ"
+- ถ้า off_topic ซ้ำ: ยืนยันอีกรอบ แต่ปรับ wording ใหม่
+- ใส่ response_type = "conversational"
+
+[UNKNOWN — ไม่ชัดเจน]
+- ถามกลับอย่างเป็นมิตร
+- ใส่ response_type = "conversational"
+
+กฎทั่วไป:
+- ห้าม emoji ห้าม [N]
+- ความหลากหลาย: ห้ามตอบซ้ำกับ context ก่อนหน้า ปรับ wording ทุกครั้ง
+
+ตอบด้วย JSON เท่านั้น:
+{{
+  "recommendation": "<ตอบแบบ conversational — ไม่ใช้ template 4-section>",
+  "response_type": "<conversational | diagnosis_explain>",
+  "first_line_drug": null,
+  "alternatives": [],
+  "when_to_see_doctor": null,
+  "sources": [],
+  "pushback_message": null,
+  "augmented_notes": null
 }}"""
 
 

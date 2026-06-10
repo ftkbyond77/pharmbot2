@@ -5,7 +5,8 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { ArrowUp, User, Menu, AlertTriangle } from "lucide-react";
 
-import { Message } from "@/types";
+import type { Message } from "@/types";
+import { shouldShowDiagnosis } from "@/types";
 import { cn, formatTime } from "@/lib/utils";
 import DiagnosisCard from "@/components/DiagnosisCard";
 import SourcePanel from "@/components/SourcePanel";
@@ -149,8 +150,8 @@ export default function ChatWindow({
                 )}
               </div>
 
-              {/* DDx card (bot only) */}
               {msg.role === "assistant" &&
+                shouldShowDiagnosis(msg.responseType) &&       
                 ((msg.diagnosis?.length ?? 0) > 0 || (msg.redFlags?.length ?? 0) > 0) && (
                   <DiagnosisCard
                     items={msg.diagnosis ?? []}
@@ -159,10 +160,11 @@ export default function ChatWindow({
                   />
                 )}
 
-              {/* Sources panel (bot only) */}
-              {msg.role === "assistant" && (msg.sources?.length ?? 0) > 0 && (
-                <SourcePanel sources={msg.sources!} className="w-full" />
-              )}
+              {msg.role === "assistant" &&
+                shouldShowDiagnosis(msg.responseType) &&        
+                (msg.sources?.length ?? 0) > 0 && (
+                  <SourcePanel sources={msg.sources!} className="w-full" />
+                )}
 
               {/* timestamp */}
               <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest px-1">

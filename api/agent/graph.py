@@ -59,19 +59,17 @@ from api.agent.nodes import (
     safety_gate_node,
     recommendation_node,
     format_node,
+    followup_node,       
 )
 
 
 # ── conditional edge functions ─────────────────────────────────
 
 def _after_classify(state: AgentState) -> str:
-    """
-    Route based on next_action set by classify_node.
-    classify_node uses cfg.no_clarify_intents so no hard-coding here.
-    """
     action = state.get("next_action", "clarify")
     logger.debug(f"[edge:after_classify] next_action={action}")
-    return action  # "retrieve" or "clarify"
+    # valid: "clarify" | "retrieve" | "followup" | "respond"
+    return action
 
 
 def _after_clarify(state: AgentState) -> str:
@@ -102,7 +100,7 @@ def _after_safety_gate(state: AgentState) -> str:
 
 def _build_graph() -> StateGraph:
     g = StateGraph(AgentState)
-
+ 
     g.add_node("classify",        classify_node)
     g.add_node("clarify",         clarify_node)
     g.add_node("retrieve",        retrieve_node)
@@ -110,30 +108,32 @@ def _build_graph() -> StateGraph:
     g.add_node("safety_gate",     safety_gate_node)
     g.add_node("recommendation",  recommendation_node)
     g.add_node("format",          format_node)
-
+    g.add_node("followup",        followup_node)  
+ 
     g.add_edge(START, "classify")
-
+ 
     g.add_conditional_edges(
         "classify",
         _after_classify,
         {
             "clarify":  "clarify",
             "retrieve": "retrieve",
+            "followup": "followup",   
         },
     )
-
+ 
     g.add_conditional_edges(
         "clarify",
         _after_clarify,
         {
-            "end_turn": "format",    # wraps clarifying_question for client
+            "end_turn": "format",
             "retrieve": "retrieve",
         },
     )
-
+ 
     g.add_edge("retrieve",        "clinical_reason")
     g.add_edge("clinical_reason", "safety_gate")
-
+ 
     g.add_conditional_edges(
         "safety_gate",
         _after_safety_gate,
@@ -142,11 +142,13 @@ def _build_graph() -> StateGraph:
             "recommendation": "recommendation",
         },
     )
-
+ 
     g.add_edge("recommendation", "format")
+    g.add_edge("followup",       "format")   
     g.add_edge("format",         END)
-
+ 
     return g
+ 
 
 
 # ── compiled singleton ─────────────────────────────────────────

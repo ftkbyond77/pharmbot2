@@ -1,18 +1,26 @@
-
 """
-routers/test_cases.py
+routers/test_cases.py — patch เดิม + แก้ JSON parse error จุดเดียว
+
+เปลี่ยนแค่ 2 จุดใน judge_cases():
+1. sanitize bot_response ก่อนฝังใน prompt (แทน " และ newline)
+2. _extract_json ที่ robust กว่าเดิม (handle partial JSON)
+
+ไม่แก้อะไรอื่นเลย
 """
 from __future__ import annotations
 import json
+import re
 from pathlib import Path
+
 import pandas as pd
 from fastapi import APIRouter, HTTPException
 from loguru import logger
 from pydantic import BaseModel
 from api.config import get_settings
 
-router = APIRouter(prefix="/test-cases", tags=["test-cases"])
+router  = APIRouter(prefix="/test-cases", tags=["test-cases"])
 CSV_DIR = Path("data/test-cases")
+
 
 def _load_csv(filename: str) -> list[dict]:
     path = CSV_DIR / filename
@@ -22,35 +30,92 @@ def _load_csv(filename: str) -> list[dict]:
     df = df.where(pd.notnull(df), None)
     return df.to_dict(orient="records")
 
+
+# ── เพิ่มเฉพาะ 2 helper นี้ ────────────────────────────────────
+
+def _clean_for_prompt(text: str) -> str:
+    """Truncate และ clean เฉพาะตัวอักษรที่ break JSON string"""
+    if len(text) > 700:
+        text = text[:700] + "..."
+    text = text.replace('"',  "'")      # double-quote → single-quote
+    text = text.replace("\n", " ")      # newline → space
+    text = text.replace("\r", "")
+    text = text.replace("\u2014", "-")  # em dash
+    text = text.replace("\u2013", "-")  # en dash
+    text = re.sub(r" {2,}", " ", text)
+    return text.strip()
+
+
+def _parse_judge_json(raw: str) -> dict | None:
+    """Parse LLM output — เดิมใช้ json.loads ตรงๆ, เพิ่ม fallback"""
+    raw = raw.strip()
+    # เดิม: strip markdown fence
+    if raw.startswith("```"):
+        raw = raw[raw.find("{"):raw.rfind("}") + 1]
+    # ลอง parse ปกติก่อน
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        pass
+    # fallback: หา { ... } block
+    start = raw.find("{")
+    end   = raw.rfind("}")
+    if start != -1 and end > start:
+        try:
+            return json.loads(raw[start:end + 1])
+        except json.JSONDecodeError:
+            pass
+    # fallback 2: JSON ถูกตัดกลางคัน → ลอง suffix ที่เป็นไปได้
+    if start != -1:
+        fragment = raw[start:].rstrip().rstrip(",")
+        for suffix in ['"}]}', '}]}', ']}', '}']:
+            try:
+                return json.loads(fragment + suffix)
+            except json.JSONDecodeError:
+                continue
+    return None
+
+# ── ───────────────────────────────────────────────────────────
+
+
 class JudgeItem(BaseModel):
-    id: str
-    category: str
-    input: str
+    id:              str
+    category:        str
+    input:           str
     expected_output: str
-    bot_response: str
-    reference: str | None = None
+    bot_response:    str
+    reference:       str | None = None
+
 
 class JudgeRequest(BaseModel):
     cases: list[JudgeItem]
 
+
 class JudgeResult(BaseModel):
-    id: str
-    score: float
-    verdict: str
+    id:        str
+    score:     float
+    verdict:   str
     reasoning: str
+
 
 @router.get("")
 async def list_test_cases():
     positive   = _load_csv("positive_cases.csv")
     negative   = _load_csv("negative_cases.csv")
     incomplete = _load_csv("incomplete_cases.csv")
-    return {"positive": positive, "negative": negative, "incomplete": incomplete,
-            "total": len(positive) + len(negative) + len(incomplete)}
+    return {
+        "positive":   positive,
+        "negative":   negative,
+        "incomplete": incomplete,
+        "total":      len(positive) + len(negative) + len(incomplete),
+    }
+
 
 @router.get("/config")
 async def get_judge_config():
     cfg = get_settings()
     return {"model": cfg.gemini_model, "api_key_set": bool(cfg.gemini_api_key)}
+
 
 @router.post("/judge", response_model=list[JudgeResult])
 async def judge_cases(req: JudgeRequest):
@@ -61,7 +126,8 @@ async def judge_cases(req: JudgeRequest):
 
     cases_text = ""
     for i, c in enumerate(cases, 1):
-        bot_resp = c.bot_response or "(ไม่มีคำตอบ)"
+        # ── จุดที่แก้: clean bot_response ก่อนฝังใน prompt ──
+        bot_resp = _clean_for_prompt(c.bot_response or "(ไม่มีคำตอบ)")
         cases_text += (
             f"\n---\nเคสที่ {i} (ID: {c.id}, ประเภท: {c.category})\n"
             f"[Input]\n{c.input}\n\n[Expected]\n{c.expected_output}\n\n"
@@ -85,11 +151,14 @@ async def judge_cases(req: JudgeRequest):
         client   = google_genai.Client(api_key=cfg.gemini_api_key)
         response = client.models.generate_content(model=cfg.gemini_model, contents=prompt)
         raw      = response.text.strip()
-        if raw.startswith("```"):
-            raw = raw[raw.find("{"):raw.rfind("}")+1]
-        data    = json.loads(raw)
+
+        data = _parse_judge_json(raw)
+        if not data:
+            raise ValueError(f"Cannot parse JSON: {raw[:120]}")
+
         results = data.get("results", [])
         return [JudgeResult(**r) for r in results]
+
     except Exception as exc:
         logger.error(f"[test-cases/judge] {exc}")
         return [JudgeResult(id=c.id, score=0, verdict="ERROR", reasoning=str(exc)) for c in cases]

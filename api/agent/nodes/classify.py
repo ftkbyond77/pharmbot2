@@ -1,11 +1,11 @@
 """
-agent/nodes/classify.py — v2
-Changes vs v1:
-- Extracts topic_shift from LLM response
-- Passes topic_shift into state (used by clarify_node to reset round counter)
-- topic_shift=True → reset context เพื่อไม่ให้ context เก่าปะปน
+agent/nodes/classify.py — v4
+Changes vs v3:
+- เพิ่ม valid intents: chit_chat, off_topic
+- chit_chat + off_topic → followup_node (ตอบ conversational ไม่ผ่าน pipeline)
+- unknown ที่ไม่มี history → format_node โดยตรง (แสดง welcome message ไม่ crash)
+- unknown ที่มี history → followup_node (อาจเป็น context ที่ LLM อ่านไม่ออก)
 """
-
 from __future__ import annotations
 
 import json
@@ -26,10 +26,10 @@ def classify_node(state: AgentState) -> dict:
         temperature=cfg.llm_temp_classify,
     )
 
-    prompt = classify_prompt(
-        user_message=state["user_message"],
-        history=state.get("history", []),
-    )
+    history      = state.get("history", [])
+    user_message = state["user_message"]
+
+    prompt   = classify_prompt(user_message=user_message, history=history)
     response = llm.invoke([
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user",   "content": prompt},
@@ -48,26 +48,39 @@ def classify_node(state: AgentState) -> dict:
     except Exception as exc:
         logger.warning(f"[classify] JSON parse error: {exc} | raw: {response.content[:200]}")
 
-    # validate — catch hallucinated values
-    valid_intents = {"symptom", "drug_info", "general_pharma", "unknown"}
+    # validate
+    valid_intents = {
+        "symptom", "drug_info", "followup",
+        "chit_chat", "off_topic", "unknown",
+        "general_pharma",   # backward compat
+    }
     if intent not in valid_intents:
         logger.warning(f"[classify] invalid intent '{intent}' → fallback 'unknown'")
         intent = "unknown"
 
     logger.info(f"[classify] intent={intent} | topic_shift={topic_shift} | reason={reason}")
 
-    # configurable: which intents skip clarify and go straight to retrieve
-    no_clarify = set(cfg.no_clarify_intents)
-    if intent in no_clarify:
-        next_action = "retrieve"
-        logger.debug(f"[classify] intent '{intent}' in no_clarify_intents → retrieve")
-    else:
-        next_action = "clarify"
-        logger.debug(f"[classify] intent '{intent}' → clarify")
-
-    # ── Topic shift: reset clarify_round ─────────────────────
-    # clarify_node จะอ่าน topic_shift จาก state และ reset round เอง
+    # topic shift → reset round
     clarify_round = 0 if topic_shift else state.get("clarify_round", 0)
+
+    # ── Routing ───────────────────────────────────────────────
+    # followup / chit_chat / off_topic → followup_node (conversational, fast)
+    # symptom → clarify pipeline
+    # drug_info / general_pharma → retrieve (no clarify)
+    # unknown:
+    #   - มี history → followup_node (bot จะ acknowledge + redirect)
+    #   - ไม่มี history → followup_node (welcome + invite to ask)
+
+    conversational_intents = {"followup", "chit_chat", "off_topic", "unknown"}
+
+    if intent in conversational_intents:
+        next_action = "followup"
+        logger.info(f"[classify] {intent} → followup_node (conversational)")
+    elif intent in {"drug_info", "general_pharma"}:
+        next_action = "retrieve"
+    else:
+        # symptom → clarify
+        next_action = "clarify"
 
     return {
         "intent":        intent,
