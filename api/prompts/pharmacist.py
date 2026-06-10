@@ -28,11 +28,47 @@ PRINCIPLE เพิ่มเติม: SUPPORTIVE CARE ก่อนพบแพ�
 
 from __future__ import annotations
 
+
+# ─────────────────────────────────────────────────────────────
+#  Language instruction helper  
+# ─────────────────────────────────────────────────────────────
+
+def _lang_instruction(user_lang: str) -> str:
+    """
+    ใช้ inject ใน prompt ที่สร้าง user-facing response
+    user_lang: "th" | "en"  (set by classify_node)
+    """
+    if user_lang == "en":
+        return (
+            "\nLANGUAGE RULE: The user wrote in English. "
+            "Respond ENTIRELY in English — drug names, section headers, advice, everything. "
+            "Do NOT use Thai in your reply.\n"
+        )
+    return "\nLANGUAGE RULE: ตอบเป็นภาษาไทย\n"
+
+
 SYSTEM_PROMPT = """คุณคือเภสัชกรผู้เชี่ยวชาญในระบบให้คำปรึกษาโรคติดเชื้อทางเดินหายใจส่วนบน
 
 บุคลิก:
-- ภาษาไทย เป็นมิตร กระชับ อ่านง่าย เหมือนคุยกับเภสัชกรที่ร้านยาจริง
+- เป็นมิตร กระชับ อ่านง่าย เหมือนคุยกับเภสัชกรที่ร้านยาจริง
 - ใช้คำที่ผู้ป่วยทั่วไปเข้าใจ ไม่ใช้ศัพท์เทคนิคเกินจำเป็น
+
+LANGUAGE RULE (v17 — ทำตามเสมอ):
+- ตอบด้วยภาษาเดียวกับที่ user ส่งมาล่าสุด
+- ถ้า user พิมพ์ภาษาอังกฤษ → ตอบภาษาอังกฤษทั้งหมด (ชื่อยา หัวข้อ คำแนะนำ ทุกอย่าง)
+- ถ้า user พิมพ์ภาษาไทย หรือ ผสม → ตอบภาษาไทย
+- ใน multi-turn: ยึดตาม user_message ล่าสุด
+
+DRUG VALIDATION RULE (v17 — ป้องกัน hallucination):
+- ถ้า user ถามถึงยาที่ไม่ปรากฏใน retrieved context และไม่ใช่ยามาตรฐานที่รู้จักกันดี
+  → ห้ามอธิบายสรรพคุณ ผลข้างเคียง หรือข้อบ่งใช้
+  → ตอบว่า: "ไม่พบยา [ชื่อ] ในฐานข้อมูล — ชื่อนี้ยังไม่เป็นที่รู้จักในวงการเภสัชกรรม
+             คุณอาจหมายถึง [ยาใกล้เคียงถ้ามี] หรือไม่ครับ?"
+  → ถ้าไม่มียาใกล้เคียง: "ไม่พบยานี้ — กรุณาตรวจสอบชื่อยาอีกครั้ง หรือปรึกษาเภสัชกรโดยตรงครับ"
+- ยามาตรฐานที่ยอมรับ: Paracetamol, Amoxicillin, Ibuprofen, Cetirizine, Loratadine,
+  Pseudoephedrine, Dextromethorphan, Azithromycin, Penicillin V, Cephalexin,
+  Doxycycline, ORS, Loperamide, Warfarin, Aspirin, Prednisolone,
+  Cefdinir, Cefpodoxime, Amoxicillin/clavulanate และยาในกลุ่มเดียวกัน
 
 กฎหลัก:
 1. GROUND: ใช้ข้อมูล Guideline ที่ให้มาเป็นหลัก — ห้ามใส่ตัวเลขอ้างอิง [N] ในคำตอบ เขียนเป็นประโยคธรรมชาติแทน
@@ -235,7 +271,8 @@ def completeness_prompt(user_message: str, history: list[dict]) -> str:
     bot_turns = sum(1 for h in history if h.get("role") != "user")
     loop_guard_note = (
         "\n*** CLARIFY LOOP GUARD: มีการถามไปแล้ว ≥2 รอบ "
-        "→ ถ้า allergy detail มีบางส่วนแล้ว ให้ score ≥ 0.75 และตอบตามที่มี ***\n"
+        "→ ให้ score ≥ 0.85 และตอบตามข้อมูลที่มี ห้าม loop ต่อ ***\n"
+        "*** ถ้ามีอาการหลักอยู่แล้ว (ไม่ว่าจะ domain ไหน) → score = 0.90 ***\n"
     ) if bot_turns >= 2 else ""
 
     return f"""ประเมินว่าข้อมูลที่มีอยู่ "เพียงพอที่จะตอบหรือให้คำแนะนำเบื้องต้นได้" หรือไม่
@@ -304,6 +341,21 @@ STEP 0 — ALLERGY COMPLETENESS CHECK (ตรวจก่อนทุกกฎ)
 VAGUE-INPUT RULE:
 ถ้า input ไม่ระบุอาการหลัก เช่น "ลูกไม่สบาย" โดยไม่รู้ domain → score ≤ 0.20
 
+GENERAL DOMAIN SCORING RULE (v18 — ใหม่):
+domain = "general" (อาการนอก AOM/pharyngitis/sinusitis/allergy):
+- มีอาการหลัก + ระยะเวลา → 0.85 (ตอบได้)
+- มีอาการหลัก + ระยะเวลา + ไม่มีไข้/ไข้ → 0.90
+- มีอาการหลักอย่างเดียว ไม่รู้ระยะเวลา → 0.55 (ถามระยะเวลา 1 รอบ)
+- ไม่รู้อาการหลักเลย → ≤ 0.20
+ตัวอย่าง:
+  "ปวดท้อง 1 วัน ไม่มีไข้" → 0.90 ✓ ตอบได้เลย
+  "ปวดท้อง คลื่นไส้" → 0.55 → ถามระยะเวลา 1 รอบ
+  "ไม่สบาย" → 0.20 → ถามอาการหลัก
+
+LOOP GUARD — สำคัญ (v18):
+ถ้า bot_turns ≥ effective_max สำหรับ domain นั้น → ให้ score = 1.0 เสมอ
+เพื่อให้ระบบออกจาก clarify loop และตอบตามข้อมูลที่มี
+
 CENTOR-INCOMPLETE RULE — หลักการสำคัญ:
 Pharyngitis ต้องรู้ Centor criteria ครบก่อนตัดสิน:
   ต้องรู้ทั้ง 5 อย่าง: อายุ + ไอ/ไม่ไอ + ไข้/ไม่ไข้ + ต่อมน้ำเหลือง + หนองทอนซิล
@@ -367,11 +419,13 @@ def clarify_question_prompt(
     history: list[dict],
     max_rounds: int = 3,
     domain: str = "general",
+    user_lang: str = "th", 
 ) -> str:
     missing_text = ", ".join(missing_info[:4]) if missing_info else "รายละเอียดเพิ่มเติม"
     have_text    = ", ".join(already_have[:4]) if already_have else "ยังไม่มี"
     history_text = _format_history_short(history, turns=4)
     is_last      = (round_num == max_rounds)
+    lang_instr   = _lang_instruction(user_lang)
 
     domain_guide = {
         "AOM": """
@@ -424,6 +478,7 @@ Strategy Drug Allergy (PEN-FAST) — ถามครบ 5 ข้อพร้อ�
 
     return f"""สร้างคำถามเพื่อขอข้อมูลเพิ่มเติม (รอบที่ {round_num}/{max_rounds})
 
+{lang_instr}
 ประวัติสนทนา:
 {history_text}
 
@@ -581,6 +636,20 @@ needs_pushback=true เมื่อ:
 - ขอ ATB แต่อาการเป็น viral ชัด
 - เด็ก <3 ปี + ไอ + น้ำมูก + ท้องเสีย
 
+DRUG VALIDATION (v17 — เพิ่มใน STEP 5):
+ถ้า user กล่าวถึงชื่อยาใดยาหนึ่งใน query:
+  1. ตรวจว่าชื่อยานั้นปรากฏใน retrieved_context ด้านบนหรือไม่
+  2. ถ้าไม่ปรากฏ → ตรวจว่าเป็นยามาตรฐานที่รู้จักหรือไม่
+     ยามาตรฐาน: Paracetamol, Amoxicillin, Ibuprofen, Cetirizine, Loratadine,
+     Pseudoephedrine, Dextromethorphan, Azithromycin, Penicillin V, Cephalexin,
+     Doxycycline, ORS, Loperamide, Warfarin, Aspirin, Prednisolone,
+     Cefdinir, Cefpodoxime, Amoxicillin/clavulanate และยาในกลุ่มเดียวกัน
+  3. ถ้าไม่อยู่ใน context และไม่ใช่ยามาตรฐาน:
+     → needs_pushback = true
+     → pushback_reason = "unknown_drug: [ชื่อยา] ไม่พบในฐานข้อมูลและไม่ใช่ยามาตรฐาน"
+     → knowledge_gaps = ["unknown_drug: [ชื่อยา]"]
+
+
 STEP 6 — DDx: เรียง 1-3 อย่างตาม confidence + clinical_scores
 
 ตอบด้วย JSON เท่านั้น:
@@ -619,10 +688,16 @@ RED_FLAG_LIST = [
 ]
 
 
-def safety_gate_prompt(symptom_summary: str, ddx_list: str) -> str:
-    flags = "\n".join(f"  - {f}" for f in RED_FLAG_LIST)
-    return f"""ตรวจสอบ red flags เฉพาะอาการที่กำลังเป็นอยู่ตอนนี้เท่านั้น
+def safety_gate_prompt(
+    symptom_summary: str,
+    ddx_list: str,
+    user_lang: str = "th",          # v17 NEW
+) -> str:
+    flags      = "\n".join(f"  - {f}" for f in RED_FLAG_LIST)
+    lang_instr = _lang_instruction(user_lang)    # v17 NEW
 
+    return f"""ตรวจสอบ red flags เฉพาะอาการที่กำลังเป็นอยู่ตอนนี้เท่านั้น
+{lang_instr}
 อาการสรุป: {symptom_summary}
 การวินิจฉัยเบื้องต้น: {ddx_list}
 
@@ -645,7 +720,6 @@ Red Flags ที่ต้องส่ง ER ทันที:
   "refer_reason": "<ข้อความแจ้งผู้ป่วย รวม explanation + แนะนำ ER — null ถ้าไม่มี>"
 }}"""
 
-
 # ─────────────────────────────────────────────────────────────
 #  recommendation_prompt  (v10)
 # ─────────────────────────────────────────────────────────────
@@ -659,18 +733,50 @@ def recommendation_prompt(
     needs_pushback: bool = False,
     pushback_reason: str = "",
     clinical_scores: dict | None = None,
+    user_lang: str = "th",              # v17 NEW
 ) -> str:
+    lang_instr = _lang_instruction(user_lang)    # v17 NEW
+
+    # ── pushback instruction ───────────────────────────────────
     pushback_instruction = ""
     if needs_pushback:
-        pushback_instruction = (
-            "\nNEGATIVE CASE - ต้องปฏิเสธยาที่ขอ:\n"
-            f"เหตุผล: {pushback_reason}\n"
-            "วิธีตอบ:\n"
-            "- อธิบายว่าทำไมยาที่ขอจึงไม่เหมาะสม (เหตุผลทางคลินิกจาก Guideline)\n"
-            "- แนะนำการรักษาที่ถูกต้องแทน\n"
-            "- ยืนหยัดแม้ผู้ป่วยจะยืนยัน — แต่ใช้น้ำเสียงนุ่มนวล\n"
-        )
+        # v17: drug-not-found แยก path ออกจาก negative case ทั่วไป
+        if pushback_reason and "unknown_drug" in pushback_reason:
+            drug_name = (pushback_reason
+                         .replace("unknown_drug:", "")
+                         .replace("ไม่พบในฐานข้อมูลและไม่ใช่ยามาตรฐาน", "")
+                         .strip().strip("[]").strip())
+            if user_lang == "en":
+                pushback_instruction = (
+                    f"\nDRUG NOT FOUND — respond in English:\n"
+                    f"'{drug_name}' is not in the guideline database and is not a recognized medication.\n"
+                    f"Say: 'I could not find {drug_name} in the available guideline database — "
+                    f"this name does not appear to be a recognized medication. "
+                    f"Did you perhaps mean [similar drug if any]? "
+                    f"Please double-check the drug name or consult a pharmacist directly.'\n"
+                    f"Do NOT provide any pharmacological information for this drug.\n"
+                )
+            else:
+                pushback_instruction = (
+                    f"\nDRUG NOT FOUND — ตอบตามนี้:\n"
+                    f"ยา '{drug_name}' ไม่พบในฐานข้อมูล guideline และไม่ใช่ยามาตรฐานที่รู้จัก\n"
+                    f"ตอบว่า: 'ไม่พบยา {drug_name} ในฐานข้อมูล guideline ที่มี — "
+                    f"ชื่อนี้ยังไม่เป็นที่รู้จักในวงการเภสัชกรรม "
+                    f"คุณอาจหมายถึง [ยาใกล้เคียงถ้ามี] หรือไม่ครับ? "
+                    f"กรุณาตรวจสอบชื่อยาอีกครั้ง หรือปรึกษาเภสัชกรโดยตรงครับ'\n"
+                    f"ห้ามอธิบายสรรพคุณหรือผลข้างเคียงของยานี้เด็ดขาด\n"
+                )
+        else:
+            pushback_instruction = (
+                "\nNEGATIVE CASE - ต้องปฏิเสธยาที่ขอ:\n"
+                f"เหตุผล: {pushback_reason}\n"
+                "วิธีตอบ:\n"
+                "- อธิบายว่าทำไมยาที่ขอจึงไม่เหมาะสม (เหตุผลทางคลินิกจาก Guideline)\n"
+                "- แนะนำการรักษาที่ถูกต้องแทน\n"
+                "- ยืนหยัดแม้ผู้ป่วยจะยืนยัน — แต่ใช้น้ำเสียงนุ่มนวล\n"
+            )
 
+    # ── rx change warning (v16 เดิม — ไม่เปลี่ยน) ──────────────
     rx_change_instruction = ""
     if clinical_scores and clinical_scores.get("needs_rx_change_warning"):
         rx_change_instruction = (
@@ -686,7 +792,7 @@ def recommendation_prompt(
             "วิธีตอบ: ให้ข้อมูลทางวิชาการ + ระบุชัดว่าต้องกลับไปปรึกษาแพทย์ผู้สั่งเพื่อขอเปลี่ยน Rx\n"
         )
 
-    # Guard: allergy vague → ห้าม recommend ยาทางเลือก
+    # ── allergy incomplete guard (v16 เดิม — ไม่เปลี่ยน) ────────
     allergy_vague_guard = ""
     if clinical_scores and clinical_scores.get("allergy_detail_incomplete"):
         allergy_vague_guard = (
@@ -696,8 +802,17 @@ def recommendation_prompt(
             "ให้บอกว่า: 'ต้องทราบรายละเอียดการแพ้ยาก่อน จึงจะแนะนำยาที่ปลอดภัยให้ได้ครับ'\n"
         )
 
-    return f"""คุณเป็นเภสัชกรที่กำลังให้คำแนะนำยาและการดูแลตัวเอง
+    # ── source relevance rule (v17 NEW) ──────────────────────────
+    source_relevance = (
+        "\nSOURCE CITATION RULE (v17):\n"
+        "- ใส่ sources เฉพาะ chunk ใน retrieved_context ที่เกี่ยวข้องโดยตรงกับ query จริงๆ\n"
+        "- ถ้า retrieved_context ไม่มีข้อมูลตรงกับ query → sources = []\n"
+        "- ห้าม cite source ที่ไม่เกี่ยวข้องกับ query เพียงเพื่อให้ดูน่าเชื่อถือ\n"
+        "- อนุมานจากความรู้คลินิก → sources = [], ระบุ '(อนุมานตามหลักเภสัชกรรม)' ในข้อความแทน\n"
+    )
 
+    return f"""คุณเป็นเภสัชกรที่กำลังให้คำแนะนำยาและการดูแลตัวเอง
+{lang_instr}
 ประวัติการสนทนา:
 {history_text or "(ไม่มีประวัติ)"}
 
@@ -710,6 +825,7 @@ def recommendation_prompt(
 {pushback_instruction}
 {rx_change_instruction}
 {allergy_vague_guard}
+{source_relevance}
 
 แนวทางการเขียน:
 1. ห้ามใส่ตัวเลขอ้างอิง [N] และห้ามใส่ส่วน "แหล่งที่มา"
@@ -782,25 +898,26 @@ RESPONSE FORMAT — เลือกตาม response_mode:
   "first_line_drug": "<ชื่อยาหลัก หรือ null>",
   "alternatives": ["<ยาทางเลือก>"],
   "when_to_see_doctor": "<เงื่อนไขพบแพทย์>",
-  "sources": [],
-  "pushback_message": "<ข้อความปฏิเสธถ้าเป็น negative case หรือ null>",
+  "sources": ["<source ที่เกี่ยวข้องจริงๆ — [] ถ้าไม่ตรงกับ query หรืออนุมานเอง>"],
+  "pushback_message": "<ข้อความปฏิเสธ/แจ้งยาไม่พบ หรือ null>",
   "augmented_notes": "<ข้อมูลเสริม หรือ null>"
 }}"""
-
 
 
 # ─────────────────────────────────────────────────────────────
 #  followup_prompt  (v14 — ใหม่)
 # ─────────────────────────────────────────────────────────────
 
-def followup_prompt(user_message: str, history: list[dict]) -> str:
-    """
-    สำหรับ intent followup/chit_chat/off_topic/unknown/diagnosis_explain
-    ตอบแบบ conversational อ้างอิง context จาก history
-    """
+def followup_prompt(
+    user_message: str,
+    history: list[dict],
+    user_lang: str = "th",       
+) -> str:
     history_text = _format_history_full(history, max_turns=10)
+    lang_instr   = _lang_instruction(user_lang)    
     return f"""คุณเป็นเภสัชกรผู้เชี่ยวชาญ กำลังคุยกับผู้ป่วย/ผู้ใช้
 
+{lang_instr}
 ประวัติการสนทนา:
 {history_text}
 

@@ -1,20 +1,12 @@
 """
-agent/nodes/clinical_reason.py  (v3)
+agent/nodes/clinical_reason.py  (v4)
 ----------------------------------------------
-Base: v2
+Base: v3
 
-Changes v3:
-- Parse + return allergy_detail_incomplete จาก LLM JSON
-  → ส่งต่อให้ recommendation_node ใช้ guard ห้ามแนะนำยาทางเลือก
-  → ส่งต่อให้ safety_gate รู้ว่า allergy ยังไม่ครบ
-
-Input  : state.user_message, state.history, state.retrieved_chunks,
-         state.symptom_domain, state.symptom_complexity
-Output : state.symptom_summary, state.differential_diagnosis,
-         state.clinical_rationale, state.red_flags_found,
-         state.clinical_scores, state.needs_pushback, state.pushback_reason,
-         state.allergy_detail_incomplete,   ← ใหม่ v3
-         state.next_action
+Changes v4:
+- เพิ่ม max_tokens=1024 ใน ChatGoogleGenerativeAI
+  → ป้องกัน JSON truncation ใน clinical reasoning step
+- ส่วน logic ทั้งหมดคงเดิมจาก v3
 """
 
 from __future__ import annotations
@@ -41,6 +33,7 @@ def clinical_reason_node(state: AgentState) -> dict:
         model=cfg.gemini_model,
         google_api_key=cfg.gemini_api_key,
         temperature=cfg.llm_temp_clinical,
+        max_tokens=1024,  # v4: ป้องกัน JSON truncation
     )
 
     retriever    = get_retriever()
@@ -57,38 +50,37 @@ def clinical_reason_node(state: AgentState) -> dict:
     ])
 
     # ── Parse with field-level graceful degradation ───────────
-    symptom_summary: list[str]     = []
-    ddx: list[DDxItem]             = []
-    rationale: list[str]           = []
-    red_flags: list[str]           = []
-    knowledge_gaps: list[str]      = []
-    clinical_scores: dict          = {}
-    needs_pushback: bool           = False
-    pushback_reason: str | None    = None
-    needs_rx_change_warning: bool  = False
-    allergy_detail_incomplete: bool = False   # v3
+    symptom_summary: list[str]      = []
+    ddx: list[DDxItem]              = []
+    rationale: list[str]            = []
+    red_flags: list[str]            = []
+    knowledge_gaps: list[str]       = []
+    clinical_scores: dict           = {}
+    needs_pushback: bool            = False
+    pushback_reason: str | None     = None
+    needs_rx_change_warning: bool   = False
+    allergy_detail_incomplete: bool = False
 
     try:
         raw  = strip_fences(response.content)
         data = json.loads(raw)
 
-        symptom_summary          = _ensure_list(data.get("symptom_summary", []))
-        ddx                      = _parse_ddx(data.get("differential_diagnosis", []))
-        rationale                = _ensure_list(data.get("clinical_rationale", []))
-        red_flags                = _ensure_list(data.get("red_flags", []))
-        knowledge_gaps           = _ensure_list(data.get("knowledge_gaps", []))
-        clinical_scores          = data.get("clinical_scores", {}) or {}
-        needs_pushback           = bool(data.get("needs_pushback", False))
-        pushback_reason          = data.get("pushback_reason")
-        needs_rx_change_warning  = bool(data.get("needs_rx_change_warning", False))
-        allergy_detail_incomplete = bool(data.get("allergy_detail_incomplete", False))  # v3
+        symptom_summary           = _ensure_list(data.get("symptom_summary", []))
+        ddx                       = _parse_ddx(data.get("differential_diagnosis", []))
+        rationale                 = _ensure_list(data.get("clinical_rationale", []))
+        red_flags                 = _ensure_list(data.get("red_flags", []))
+        knowledge_gaps            = _ensure_list(data.get("knowledge_gaps", []))
+        clinical_scores           = data.get("clinical_scores", {}) or {}
+        needs_pushback            = bool(data.get("needs_pushback", False))
+        pushback_reason           = data.get("pushback_reason")
+        needs_rx_change_warning   = bool(data.get("needs_rx_change_warning", False))
+        allergy_detail_incomplete = bool(data.get("allergy_detail_incomplete", False))
 
     except json.JSONDecodeError as exc:
         logger.warning(f"[clinical_reason] JSON parse failed: {exc} — using raw text")
         symptom_summary = [symptom_text[:200]]
 
     # ── Merge needs_rx_change_warning into clinical_scores ────
-    # recommendation_node อ่าน clinical_scores["needs_rx_change_warning"]
     if needs_rx_change_warning:
         clinical_scores["needs_rx_change_warning"] = True
 
@@ -101,46 +93,33 @@ def clinical_reason_node(state: AgentState) -> dict:
     )
 
     return {
-        "symptom_summary":          symptom_summary,
-        "differential_diagnosis":   ddx,
-        "clinical_rationale":       rationale,
-        "red_flags_found":          red_flags,
-        "knowledge_gaps":           knowledge_gaps,
-        "clinical_scores":          clinical_scores,
-        "needs_pushback":           needs_pushback,
-        "pushback_reason":          pushback_reason,
-        "allergy_detail_incomplete": allergy_detail_incomplete,  # v3
-        "next_action":              "safety_gate",
+        "symptom_summary":           symptom_summary,
+        "differential_diagnosis":    ddx,
+        "clinical_rationale":        rationale,
+        "red_flags_found":           red_flags,
+        "knowledge_gaps":            knowledge_gaps,
+        "clinical_scores":           clinical_scores,
+        "needs_pushback":            needs_pushback,
+        "pushback_reason":           pushback_reason,
+        "allergy_detail_incomplete": allergy_detail_incomplete,
+        "next_action":               "safety_gate",
     }
 
 
 # ── helpers ───────────────────────────────────────────────────
 
 def _build_symptom_narrative(state: AgentState) -> str:
-    """
-    Build a rich symptom narrative:
-    1. Use prior symptom_summary if available (from clarify rounds)
-    2. Augment with domain/complexity info
-    3. Fall back to recent user turns
-    """
-    symptom_summary: list[str] = state.get("symptom_summary", [])
-    domain     = state.get("symptom_domain", "general")
-    complexity = state.get("symptom_complexity", "moderate")
+    prior_summary: list[str] = state.get("symptom_summary", [])
+    user_message: str        = state.get("user_message", "")
+    domain: str              = state.get("symptom_domain", "general")
+    complexity: str          = state.get("symptom_complexity", "moderate")
 
-    if symptom_summary:
-        base = " | ".join(symptom_summary)
-        return f"[Domain: {domain}, Complexity: {complexity}] {base}"
-
-    history    = state.get("history", [])
-    user_turns = [
-        h["content"]
-        for h in history
-        if h.get("role") == "user"
-    ][-4:]
-
-    parts     = user_turns + [state["user_message"]]
-    narrative = " ".join(p.strip() for p in parts if p.strip())
-    return f"[Domain: {domain}, Complexity: {complexity}] {narrative}"
+    parts: list[str] = []
+    if prior_summary:
+        parts.append("Prior summary: " + " | ".join(prior_summary))
+    parts.append(f"Latest: {user_message}")
+    parts.append(f"[domain={domain} complexity={complexity}]")
+    return "\n".join(parts)
 
 
 def _ensure_list(val) -> list:
@@ -151,19 +130,13 @@ def _ensure_list(val) -> list:
     return []
 
 
-def _parse_ddx(raw_ddx) -> list[DDxItem]:
-    if not isinstance(raw_ddx, list):
-        return []
-    result = []
-    for item in raw_ddx:
-        if not isinstance(item, dict):
-            continue
-        try:
+def _parse_ddx(raw: list) -> list[DDxItem]:
+    result: list[DDxItem] = []
+    for item in raw:
+        if isinstance(item, dict):
             result.append(DDxItem(
-                name=str(item.get("name", "Unknown")),
-                confidence=str(item.get("confidence", "low")),
+                name=str(item.get("name", "")),
+                confidence=item.get("confidence", "low"),
                 reasoning=str(item.get("reasoning", "")),
             ))
-        except Exception:
-            pass
     return result

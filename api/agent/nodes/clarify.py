@@ -1,21 +1,21 @@
 """
-agent/nodes/clarify.py — v7
-Base: v6
+agent/nodes/clarify.py — v8
+Base: v7
 
-Changes v7:
+Changes v8:
 ─────────────────────────────────────────────────────────────
-1. ลบ _ALLERGY_VAGUE_KEYWORDS, _ALLERGY_ANSWERED_KEYWORDS,
-   _ALLERGY_DETAIL_KEYWORDS ทั้งหมด — ไม่มี keyword list เหลือเลย
+L1 — pass user_lang จาก state เข้า clarify_question_prompt
+     → คำถามตอบภาษาเดียวกับ user เสมอ
 
-2. ลบ _is_vague_allergy() Python regex check ทิ้ง
-   → ให้ completeness_prompt (LLM) เป็น single source of truth
+T1 — เพิ่ม max_tokens=512 ใน LLM
+     → ป้องกัน truncation ใน clarify question
 
-3. clarify_node: เรียบง่ายขึ้น — อ่าน score จาก LLM แล้วตัดสินใจ
-   ไม่มี pre-LLM override อีกต่อไป
+M1 — HARD ESCAPE เมื่อถึง effective_max
+     → ถ้า current_round >= effective_max → force retrieve ทันที
+       ไม่ว่า score จะเป็นเท่าไหร่ ไม่ถามซ้ำ
 
-4. คง allergy_gate_triggered flag สำหรับ logging (อ่านจาก domain ที่ LLM คืนมา)
-
-5. error handling ครบ — ถ้า LLM fail → fallback ask แทน crash
+M2 — fallback question ภาษา-aware
+     → ถ้า LLM generate question ล้มเหลว → fallback ตาม user_lang
 """
 from __future__ import annotations
 
@@ -40,6 +40,7 @@ def clarify_node(state: AgentState) -> dict:
         model=cfg.gemini_model,
         google_api_key=cfg.gemini_api_key,
         temperature=cfg.llm_temp_clarify,
+        max_tokens=512,         # v8: ป้องกัน truncation
     )
 
     topic_shift   = state.get("topic_shift", False)
@@ -47,8 +48,9 @@ def clarify_node(state: AgentState) -> dict:
     if topic_shift:
         logger.info("[clarify] topic_shift detected → reset clarify_round=0")
 
-    history  = state.get("history", [])
-    user_msg = state["user_message"]
+    history   = state.get("history", [])
+    user_msg  = state["user_message"]
+    user_lang = state.get("user_lang", "th")   # v8: ดึงภาษาจาก state
 
     # ── LLM completeness check ────────────────────────────────
     score        = cfg.completeness_threshold
@@ -88,18 +90,25 @@ def clarify_node(state: AgentState) -> dict:
     logger.info(
         f"[clarify] round={current_round}/{effective_max} domain={domain} "
         f"score={score:.2f} threshold={cfg.completeness_threshold} "
-        f"missing={missing} allergy_gate={allergy_gate_triggered}"
+        f"missing={missing} allergy_gate={allergy_gate_triggered} "
+        f"user_lang={user_lang}"
     )
 
     # ── Decision ──────────────────────────────────────────────
+    # v8: HARD ESCAPE — ถ้าถามครบ effective_max แล้ว → retrieve เสมอ ไม่ถามซ้ำ
+    hard_escape = current_round >= effective_max
+
     should_ask = (
-        score < cfg.completeness_threshold
+        not hard_escape
+        and score < cfg.completeness_threshold
         and len(missing) > 0
-        and current_round < effective_max
     )
 
     if not should_ask:
-        logger.info("[clarify] sufficient info → proceed to retrieve")
+        if hard_escape:
+            logger.info(f"[clarify] hard escape at round={current_round} → force retrieve")
+        else:
+            logger.info("[clarify] sufficient info → proceed to retrieve")
         return {
             "completeness_score":  score,
             "clarify_round":       current_round,
@@ -119,6 +128,7 @@ def clarify_node(state: AgentState) -> dict:
                 history=history,
                 max_rounds=effective_max,
                 domain=domain,
+                user_lang=user_lang,      # v8: pass language
             )},
         ])
         q_content = q_resp.content
@@ -132,7 +142,12 @@ def clarify_node(state: AgentState) -> dict:
         question = q_content.strip()
     except Exception as exc:
         logger.warning(f"[clarify] question generation error: {exc}")
-        question = "ช่วยเล่าอาการเพิ่มเติมหน่อยได้ไหมครับ?"
+        # v8: fallback ภาษา-aware
+        question = (
+            "Could you tell me more about your symptoms?"
+            if user_lang == "en"
+            else "ช่วยเล่าอาการเพิ่มเติมหน่อยได้ไหมครับ?"
+        )
 
     logger.info(f"[clarify] asking round {current_round+1}: '{question[:80]}'")
     return {

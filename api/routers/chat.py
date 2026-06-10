@@ -1,13 +1,14 @@
 """
-routers/chat.py  (v3)
+routers/chat.py  (v4)
 ------------------------------
 POST   /chat                        — main chat endpoint
 GET    /chat/{session_id}/history   — retrieve session history
 DELETE /chat/{session_id}           — clear session
 
-CHANGES v3:
-- _empty_state: เพิ่ม topic_shift: False
-- ไม่มีการเปลี่ยนแปลงอื่น (backward compatible)
+CHANGES v4:
+- _empty_state: เพิ่ม user_lang: "th"  (default Thai)
+  classify_node จะ overwrite ค่านี้ทุกครั้งที่ user ส่งข้อความ
+- ไม่มีการเปลี่ยนแปลงอื่น (backward compatible กับ v3)
 """
 
 from __future__ import annotations
@@ -91,7 +92,8 @@ def _empty_state(session_id: str) -> dict[str, Any]:
 
         # intent
         "intent":                 "unknown",
-        "topic_shift":            False,         # v3: new field
+        "topic_shift":            False,
+        "user_lang":              "th",     # v4: default Thai; overwritten by classify_node
 
         # clarify
         "clarify_round":          0,
@@ -114,6 +116,9 @@ def _empty_state(session_id: str) -> dict[str, Any]:
         # negative case
         "needs_pushback":         False,
         "pushback_reason":        None,
+
+        # allergy flag (v3)
+        "allergy_detail_incomplete": False,
 
         # safety gate
         "refer_to_doctor":        False,
@@ -221,12 +226,13 @@ async def get_history(
     if not state:
         raise HTTPException(status_code=404, detail="Session not found or expired")
     return {
-        "session_id": session_id,
-        "history":    state.get("history", []),
-        "rounds":     state.get("clarify_round", 0),
-        "intent":     state.get("intent", "unknown"),
-        "domain":     state.get("symptom_domain", "general"),
-        "topic_shift": state.get("topic_shift", False),  # v3
+        "session_id":  session_id,
+        "history":     state.get("history", []),
+        "rounds":      state.get("clarify_round", 0),
+        "intent":      state.get("intent", "unknown"),
+        "domain":      state.get("symptom_domain", "general"),
+        "topic_shift": state.get("topic_shift", False),
+        "user_lang":   state.get("user_lang", "th"),   # v4: expose for debug
     }
 
 

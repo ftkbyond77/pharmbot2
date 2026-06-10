@@ -1,9 +1,9 @@
 """
-agent/state.py  (v3)
+agent/state.py  (v4)
 ------------------------------
-CHANGES v3:
-- Added topic_shift: bool  (set by classify_node, used by clarify_node)
-  เมื่อ True → clarify_node จะ reset round counter
+CHANGES v4:
+- Added user_lang: str  (set by classify_node from user_message detection)
+  "th" | "en" — ใช้โดย prompt functions ทุกตัวเพื่อตอบภาษาเดียวกับ user
 """
 
 from __future__ import annotations
@@ -40,6 +40,7 @@ class AgentState(TypedDict):
     # ── Intent classification ────────────────────────────────
     intent: Literal["symptom", "drug_info", "general_pharma", "unknown"]
     topic_shift: bool  # v3: True เมื่อ user เปลี่ยนหัวข้อใหม่
+    user_lang:   str   # v4: "th" | "en" — detected from user_message by classify_node
 
     # ── Clarification loop ───────────────────────────────────
     clarify_round:         int           # 0–max_clarify_rounds
@@ -66,6 +67,9 @@ class AgentState(TypedDict):
     # Negative case handling
     needs_pushback:   bool
     pushback_reason:  str | None
+
+    # allergy detail flag (v3)
+    allergy_detail_incomplete: bool
 
     # ── Safety Gate ──────────────────────────────────────────
     refer_to_doctor:  bool

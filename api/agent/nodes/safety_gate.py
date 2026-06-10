@@ -41,7 +41,7 @@ def safety_gate_node(state: AgentState) -> dict:
         d["name"] for d in state.get("differential_diagnosis", [])
     ) or "ยังไม่ระบุ"
 
-    prompt = safety_gate_prompt(symptom_text, ddx_text)
+    prompt = safety_gate_prompt(symptom_text, ddx_text, user_lang=state.get("user_lang", "th"))
     response = llm.invoke([
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user",   "content": prompt},

@@ -1,9 +1,9 @@
 """
-agent/nodes/followup.py — v2
-Changes vs v1:
-- อ่าน response_type จาก LLM response ("conversational" | "diagnosis_explain")
-- ถ้า diagnosis_explain → คง differential_diagnosis + sources ไว้ใน state
-- ถ้า conversational → clear differential_diagnosis + retrieved_chunks
+agent/nodes/followup.py — v3
+Changes vs v2:
+- Pass user_lang จาก state เข้า followup_prompt
+  → ตอบภาษาเดียวกับ user (EN/TH)
+- ส่วนอื่นคงเดิมทั้งหมดจาก v2
 """
 from __future__ import annotations
 
@@ -31,8 +31,13 @@ def followup_node(state: AgentState) -> dict:
 
     history      = state.get("history", [])
     user_message = state["user_message"]
+    user_lang    = state.get("user_lang", "th")  # v3: ดึงภาษาจาก state
 
-    prompt   = followup_prompt(user_message=user_message, history=history)
+    prompt   = followup_prompt(
+        user_message=user_message,
+        history=history,
+        user_lang=user_lang,   # v3: pass language
+    )
     response = llm.invoke([
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user",   "content": prompt},
@@ -62,38 +67,32 @@ def followup_node(state: AgentState) -> dict:
             recommendation = str(raw_content).strip()
 
     if not recommendation:
-        recommendation = "ขออภัยครับ ไม่สามารถประมวลผลได้ในขณะนี้"
+        recommendation = (
+            "Sorry, I was unable to process your request at this time."
+            if user_lang == "en"
+            else "ขออภัยครับ ไม่สามารถประมวลผลได้ในขณะนี้"
+        )
 
     # validate response_type
-    if response_type not in {"conversational", "diagnosis_explain"}:
+    valid_types = {"conversational", "diagnosis_explain"}
+    if response_type not in valid_types:
         response_type = "conversational"
 
-    logger.info(
-        f"[followup] intent={state.get('intent')} "
-        f"response_type={response_type} | '{user_message[:60]}'"
-    )
+    logger.info(f"[followup] response_type={response_type} lang={user_lang}")
 
-    base = {
-        "recommendation":   recommendation,
-        "response_type":    response_type,
-        "first_line_drug":  None,
-        "alternatives":     [],
-        "when_to_see_doctor": None,
-        "augmented_notes":  augmented_notes,
-        "pushback_message": None,
-        "next_action":      "format",
-    }
-
+    # ถ้า diagnosis_explain → คง DDx + sources ไว้ใน state
     if response_type == "diagnosis_explain":
-        # คง DDx + sources ไว้เพื่อให้ format_node แสดงได้
-        # ไม่ต้อง clear
-        logger.info("[followup] diagnosis_explain → keep DDx + sources in state")
-        return base
+        return {
+            "recommendation":  recommendation,
+            "response_type":   response_type,
+            "augmented_notes": augmented_notes,
+        }
 
-    # conversational — clear clinical state จาก turn ก่อนหน้า
+    # conversational → clear DDx + retrieved_chunks
     return {
-        **base,
+        "recommendation":         recommendation,
+        "response_type":          response_type,
+        "augmented_notes":        augmented_notes,
         "differential_diagnosis": [],
-        "sources":                [],
         "retrieved_chunks":       [],
     }
