@@ -31,7 +31,7 @@ async def ready():
 
     # ── Qdrant ────────────────────────────────────────────────
     try:
-        client = QdrantClient(url=cfg.qdrant_url, timeout=3)
+        client = QdrantClient(url=cfg.qdrant_url, api_key=cfg.qdrant_api_key, timeout=3)
         collections = client.get_collections().collections
         checks["qdrant"] = f"ok ({len(collections)} collections)"
     except Exception as e:
