@@ -96,7 +96,7 @@ class Retriever:
         cfg = get_settings()
         logger.info(f"[retriever] init — model={cfg.embedding_model} device={cfg.embedding_device}")
         self._model      = SentenceTransformer(cfg.embedding_model, device=cfg.embedding_device)
-        self._client     = QdrantClient(url=cfg.qdrant_url)
+        self._client     = QdrantClient(url=cfg.qdrant_url, api_key=cfg.qdrant_api_key)
         self._collection = cfg.qdrant_collection
 
     # ── public API ─────────────────────────────────────────────
